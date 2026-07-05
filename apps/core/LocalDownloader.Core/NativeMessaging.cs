@@ -1,7 +1,7 @@
 using System.Buffers.Binary;
 using System.Text;
 
-namespace LocalDownloader.Host;
+namespace LocalDownloader.Core;
 
 public static class NativeMessaging
 {

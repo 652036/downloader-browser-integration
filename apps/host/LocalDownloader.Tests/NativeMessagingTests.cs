@@ -1,5 +1,5 @@
 using System.Text;
-using LocalDownloader.Host;
+using LocalDownloader.Core;
 
 namespace LocalDownloader.Tests;
 

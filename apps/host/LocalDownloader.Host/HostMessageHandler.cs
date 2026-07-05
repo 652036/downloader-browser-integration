@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Collections.Concurrent;
+using LocalDownloader.Core;
 
 namespace LocalDownloader.Host;
 

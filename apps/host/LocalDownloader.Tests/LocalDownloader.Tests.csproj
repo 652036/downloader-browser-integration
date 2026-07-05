@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\LocalDownloader.Host\LocalDownloader.Host.csproj" />
+    <ProjectReference Include="..\..\core\LocalDownloader.Core\LocalDownloader.Core.csproj" />
   </ItemGroup>
 
 </Project>

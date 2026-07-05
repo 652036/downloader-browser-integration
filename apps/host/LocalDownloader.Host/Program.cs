@@ -1,3 +1,4 @@
+using LocalDownloader.Core;
 using LocalDownloader.Host;
 
 var downloadRoot = Path.Combine(

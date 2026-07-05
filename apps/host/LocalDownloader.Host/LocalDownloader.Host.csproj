@@ -9,4 +9,8 @@
     <RootNamespace>LocalDownloader.Host</RootNamespace>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\..\core\LocalDownloader.Core\LocalDownloader.Core.csproj" />
+  </ItemGroup>
+
 </Project>

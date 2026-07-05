@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace LocalDownloader.Host;
+namespace LocalDownloader.Core;
 
 public sealed class DownloadRequest
 {
@@ -19,8 +19,17 @@ public sealed class DownloadRequest
     [JsonPropertyName("referrer")]
     public string? Referrer { get; set; }
 
+    [JsonPropertyName("cookieHeader")]
+    public string? CookieHeader { get; set; }
+
     [JsonPropertyName("userAgent")]
     public string? UserAgent { get; set; }
+
+    [JsonPropertyName("fileSize")]
+    public long? FileSize { get; set; }
+
+    [JsonPropertyName("mime")]
+    public string? Mime { get; set; }
 
     [JsonPropertyName("source")]
     public string? Source { get; set; }

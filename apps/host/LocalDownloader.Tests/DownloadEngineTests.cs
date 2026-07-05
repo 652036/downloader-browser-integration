@@ -1,7 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
-using LocalDownloader.Host;
+using LocalDownloader.Core;
 
 namespace LocalDownloader.Tests;
 

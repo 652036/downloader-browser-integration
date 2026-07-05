@@ -1,4 +1,4 @@
-namespace LocalDownloader.Host;
+namespace LocalDownloader.Core;
 
 public static class FileNameSanitizer
 {

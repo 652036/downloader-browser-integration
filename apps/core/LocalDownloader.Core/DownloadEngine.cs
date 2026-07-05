@@ -1,4 +1,4 @@
-namespace LocalDownloader.Host;
+namespace LocalDownloader.Core;
 
 public interface IDownloadEngine
 {
@@ -81,6 +81,11 @@ public sealed class DownloadEngine : IDownloadEngine
             (referrer.Scheme == Uri.UriSchemeHttp || referrer.Scheme == Uri.UriSchemeHttps))
         {
             requestMessage.Headers.Referrer = referrer;
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.CookieHeader))
+        {
+            requestMessage.Headers.TryAddWithoutValidation("Cookie", request.CookieHeader);
         }
 
         return requestMessage;

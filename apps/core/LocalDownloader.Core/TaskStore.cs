@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace LocalDownloader.Host;
+namespace LocalDownloader.Core;
 
 public sealed class TaskStore
 {

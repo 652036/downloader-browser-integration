@@ -1,4 +1,4 @@
-using LocalDownloader.Host;
+using LocalDownloader.Core;
 
 namespace LocalDownloader.Tests;
 
