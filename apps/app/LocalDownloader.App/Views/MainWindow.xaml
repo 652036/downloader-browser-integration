@@ -29,7 +29,20 @@
             <DataGrid.Columns>
                 <DataGridTextColumn Header="File" Binding="{Binding FileName}" Width="2*" />
                 <DataGridTextColumn Header="Size" Binding="{Binding SizeDisplay}" Width="*" />
-                <DataGridTextColumn Header="Progress" Binding="{Binding ProgressDisplay}" Width="1.5*" />
+                <DataGridTemplateColumn Header="Progress" Width="1.5*">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <Grid Margin="2">
+                                <ProgressBar Minimum="0" Maximum="100" Height="16"
+                                             Value="{Binding ProgressPercent, Mode=OneWay}" />
+                                <TextBlock Text="{Binding ProgressDisplay}"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"
+                                           FontSize="11" />
+                            </Grid>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
                 <DataGridTextColumn Header="Speed" Binding="{Binding SpeedDisplay}" Width="*" />
                 <DataGridTextColumn Header="ETA" Binding="{Binding EtaDisplay}" Width="*" />
                 <DataGridTextColumn Header="Status" Binding="{Binding StatusDisplay}" Width="1.5*" />

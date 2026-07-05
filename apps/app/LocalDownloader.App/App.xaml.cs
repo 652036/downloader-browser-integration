@@ -110,6 +110,7 @@ public partial class App : System.Windows.Application
                     var request = viewModel.Request;
                     request.SuggestedFilename = viewModel.FileName;
                     DownloadManager?.CreateTask(request);
+                    ShowMainWindow();
                     break;
 
                 case ConfirmDownloadOutcome.ReturnToBrowser:
