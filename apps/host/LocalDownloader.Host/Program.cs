@@ -1,37 +1,66 @@
 using LocalDownloader.Core;
 using LocalDownloader.Host;
 
-var downloadRoot = Path.Combine(
-    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-    "Downloads",
-    "LocalDownloader");
+var logger = new HostLogger();
+logger.Log("LocalDownloader.Host starting.");
 
-using var httpClient = new HttpClient();
-var handler = new HostMessageHandler(new DownloadEngine(httpClient, downloadRoot));
 var input = Console.OpenStandardInput();
 var output = Console.OpenStandardOutput();
 
-while (true)
+// The Host is a thin proxy: it never parses download.create business fields. Its only job is
+// to get bytes from the browser's stdio Native Messaging channel to the App's named pipe (and
+// back), starting the App if the pipe is not already listening.
+string? firstMessage;
+try
 {
-    string? requestJson;
-
-    try
-    {
-        requestJson = await NativeMessaging.ReadMessageAsync(input, CancellationToken.None);
-    }
-    catch (Exception ex) when (ex is IOException or InvalidDataException)
-    {
-        await Console.Error.WriteLineAsync($"Native messaging read error: {ex.Message}");
-        break;
-    }
-
-    if (requestJson is null)
-    {
-        break;
-    }
-
-    var responseJson = await handler.HandleAsync(requestJson, CancellationToken.None);
-    await NativeMessaging.WriteMessageAsync(output, responseJson, CancellationToken.None);
+    firstMessage = await NativeMessaging.ReadMessageAsync(input, CancellationToken.None);
+}
+catch (Exception ex) when (ex is IOException or InvalidDataException)
+{
+    logger.Log($"Native messaging read error before first message: {ex.Message}");
+    return;
 }
 
-await handler.WhenIdleAsync();
+if (firstMessage is null)
+{
+    logger.Log("Browser closed the connection before sending any message.");
+    return;
+}
+
+var connector = new AppPipeConnector(logger);
+var appPipe = await connector.ConnectAsync(CancellationToken.None);
+
+if (appPipe is null)
+{
+    // fail-open: tell the browser we could not reach the App at all so it can fall back to a
+    // normal browser download instead of losing the request.
+    string? requestId = null;
+    try
+    {
+        using var document = System.Text.Json.JsonDocument.Parse(firstMessage);
+        if (document.RootElement.TryGetProperty("id", out var idProperty))
+        {
+            requestId = idProperty.GetString();
+        }
+    }
+    catch (System.Text.Json.JsonException)
+    {
+        // Ignore; respond without an id.
+    }
+
+    var errorJson = RelayService.BuildAppUnavailableError(requestId);
+    await NativeMessaging.WriteMessageAsync(output, errorJson, CancellationToken.None);
+    logger.Log("App unavailable; returned download.error to browser.");
+    return;
+}
+
+using (appPipe)
+{
+    // Forward the already-read first message, then relay everything else bidirectionally.
+    await NativeMessaging.WriteMessageAsync(appPipe, firstMessage, CancellationToken.None);
+
+    var relay = new RelayService(logger);
+    await relay.RunAsync(input, output, appPipe, CancellationToken.None);
+}
+
+logger.Log("LocalDownloader.Host exiting.");
