@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Windows;
+using LocalDownloader.App.ViewModels;
 
 namespace LocalDownloader.App.Views;
 
@@ -9,8 +10,12 @@ namespace LocalDownloader.App.Views;
 /// </summary>
 public partial class MainWindow : Window
 {
-    public MainWindow()
+    public MainViewModel ViewModel { get; }
+
+    public MainWindow(MainViewModel viewModel)
     {
+        ViewModel = viewModel;
+        DataContext = viewModel;
         InitializeComponent();
     }
 
@@ -23,5 +28,10 @@ public partial class MainWindow : Window
 
         e.Cancel = true;
         Hide();
+    }
+
+    private void OnSettingsClick(object sender, RoutedEventArgs e)
+    {
+        App.Current.ShowSettingsWindow();
     }
 }

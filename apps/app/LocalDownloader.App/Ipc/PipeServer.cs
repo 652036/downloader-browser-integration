@@ -16,6 +16,7 @@ public sealed class PipeServer : IAsyncDisposable
 
     private readonly CancellationTokenSource _stopCts = new();
     private readonly List<Task> _clientLoops = new();
+    private readonly List<NamedPipeServerStream> _activeConnections = new();
     private readonly object _lock = new();
     private Task? _acceptLoop;
 
@@ -24,6 +25,32 @@ public sealed class PipeServer : IAsyncDisposable
     /// written back as the response frame on the same connection (or null to send nothing).
     /// </summary>
     public Func<string, CancellationToken, Task<string?>>? OnMessageReceived { get; set; }
+
+    /// <summary>
+    /// Sends an unsolicited JSON frame (e.g. download.returnToBrowser) to every currently
+    /// connected client. There is normally at most one live Host connection at a time, so this
+    /// is equivalent to "tell the connected browser extension"; harmless no-op if none connected.
+    /// </summary>
+    public async Task BroadcastAsync(string json, CancellationToken cancellationToken)
+    {
+        NamedPipeServerStream[] connections;
+        lock (_lock)
+        {
+            connections = _activeConnections.ToArray();
+        }
+
+        foreach (var pipe in connections)
+        {
+            try
+            {
+                await NativeMessaging.WriteMessageAsync(pipe, json, cancellationToken);
+            }
+            catch (IOException)
+            {
+                // Connection likely closed concurrently; HandleClientAsync will clean it up.
+            }
+        }
+    }
 
     public void Start()
     {
@@ -77,6 +104,11 @@ public sealed class PipeServer : IAsyncDisposable
 
     private async Task HandleClientAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken)
     {
+        lock (_lock)
+        {
+            _activeConnections.Add(pipe);
+        }
+
         try
         {
             while (!cancellationToken.IsCancellationRequested)
@@ -127,6 +159,11 @@ public sealed class PipeServer : IAsyncDisposable
         }
         finally
         {
+            lock (_lock)
+            {
+                _activeConnections.Remove(pipe);
+            }
+
             pipe.Dispose();
         }
     }

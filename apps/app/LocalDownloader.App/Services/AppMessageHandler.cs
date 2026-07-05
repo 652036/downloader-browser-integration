@@ -24,11 +24,12 @@ public sealed class AppMessageHandler
     private readonly SettingsStore _settingsStore;
 
     /// <summary>
-    /// Invoked when a download.create message arrives, before the task is queued, so the UI
-    /// layer can show the confirmation popup. Return true to proceed with queuing the task
-    /// (or let the caller decide asynchronously); the App wires this to popup workflow.
+    /// Raised when a validated download.create message arrives. download.accepted is already
+    /// sent back to the browser by the time this fires; the App subscribes to show the IDM-style
+    /// confirmation popup and only calls DownloadManagerService.CreateTask once the user picks
+    /// "Start Download" (Cancel / Return to Browser take other paths; see App.xaml.cs).
     /// </summary>
-    public Action<DownloadRequest>? DownloadRequested { get; set; }
+    public event Action<DownloadRequest>? DownloadRequested;
 
     public AppMessageHandler(DownloadManagerService downloadManager, SettingsStore settingsStore)
     {
