@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Local Downloader Bridge",
-  "version": "0.1.0",
-  "description": "Send selected browser downloads to the local native download manager.",
+  "version": "0.2.0",
+  "description": "Take over matching browser downloads and hand them to the local download manager.",
   "icons": {
     "16": "icons/icon.svg",
     "48": "icons/icon.svg",
@@ -12,11 +12,12 @@
     "contextMenus",
     "nativeMessaging",
     "downloads",
+    "cookies",
+    "storage",
     "activeTab"
   ],
   "host_permissions": [
-    "http://*/*",
-    "https://*/*"
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js"
