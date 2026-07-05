@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Local Downloader">
+  <rect width="128" height="128" rx="20" fill="#1f5f74"/>
+  <path d="M64 22c5 0 9 4 9 9v41l13-13a9 9 0 0 1 13 13L70 101a9 9 0 0 1-12 0L29 72a9 9 0 1 1 13-13l13 13V31c0-5 4-9 9-9z" fill="#f4f7f8"/>
+  <path d="M31 105h66a8 8 0 0 1 0 16H31a8 8 0 0 1 0-16z" fill="#9bd4c8"/>
+</svg>
