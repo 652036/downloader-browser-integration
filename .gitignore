@@ -1,5 +1,6 @@
 bin/
 obj/
 work/
+publish/
 installers/generated/
 *.user

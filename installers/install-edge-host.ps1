@@ -13,7 +13,8 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $templatePath = Join-Path $PSScriptRoot 'native-host-manifest.template.json'
 $generatedDir = Join-Path $PSScriptRoot 'generated'
 $manifestPath = Join-Path $generatedDir 'edge-native-host-manifest.json'
-$hostExePath = Join-Path $repoRoot 'apps\host\LocalDownloader.Host\bin\Release\net10.0\win-x64\publish\LocalDownloader.Host.exe'
+$hostExePath = Join-Path $repoRoot 'publish\LocalDownloader.Host.exe'
+$appExePath = Join-Path $repoRoot 'publish\LocalDownloader.App.exe'
 $registryPath = "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$hostName"
 
 if (-not (Test-Path -LiteralPath $templatePath -PathType Leaf)) {
@@ -21,13 +22,17 @@ if (-not (Test-Path -LiteralPath $templatePath -PathType Leaf)) {
 }
 
 if (-not (Test-Path -LiteralPath $hostExePath -PathType Leaf)) {
-    $message = "Published host executable was not found: $hostExePath. Run dotnet publish before installing."
+    $message = "Published host executable was not found: $hostExePath. Run dotnet publish (both Host and App into the shared publish directory) before installing."
     if ($WhatIfPreference) {
         Write-Warning $message
     }
     else {
         throw $message
     }
+}
+
+if (-not (Test-Path -LiteralPath $appExePath -PathType Leaf)) {
+    Write-Warning "LocalDownloader.App.exe was not found next to the host: $appExePath. The host launches the App from its own directory; publish the App project into the same publish directory."
 }
 
 $allowedOrigins = @($ExtensionId | ForEach-Object { "chrome-extension://$_/" })
