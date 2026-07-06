@@ -1,48 +1,91 @@
 <Window x:Class="LocalDownloader.App.Views.ConfirmDownloadWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="New Download"
-        Height="260" Width="480"
+        Title="新建下载"
+        Height="300" Width="520"
         WindowStartupLocation="CenterScreen"
         Topmost="True"
         ResizeMode="NoResize"
-        ShowInTaskbar="True">
-    <Grid Margin="16">
+        ShowInTaskbar="True"
+        Background="{DynamicResource WindowBgBrush}"
+        Foreground="{DynamicResource TextPrimaryBrush}"
+        FontFamily="{StaticResource AppFontFamily}"
+        WindowStyle="None">
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="40"
+                      GlassFrameThickness="0"
+                      CornerRadius="0"
+                      ResizeBorderThickness="0"
+                      UseAeroCaptionButtons="False" />
+    </WindowChrome.WindowChrome>
+
+    <Grid>
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
+            <RowDefinition Height="40" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
-        <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="Auto" />
-            <ColumnDefinition Width="*" />
-            <ColumnDefinition Width="Auto" />
-        </Grid.ColumnDefinitions>
 
-        <TextBlock Grid.Row="0" Grid.Column="0" Text="File name:" VerticalAlignment="Center" Margin="0,0,8,8" />
-        <TextBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
-                 Text="{Binding FileName, UpdateSourceTrigger=PropertyChanged}" />
+        <!-- 自绘标题栏 -->
+        <Border Grid.Row="0" Background="{DynamicResource PanelBgBrush}">
+            <Grid>
+                <TextBlock Text="新建下载"
+                           Margin="16,0,0,0"
+                           VerticalAlignment="Center"
+                           FontSize="13"
+                           Foreground="{DynamicResource TextSecondaryBrush}" />
+                <Button Style="{StaticResource CaptionCloseButton}"
+                        Content="&#xE8BB;"
+                        ToolTip="关闭"
+                        HorizontalAlignment="Right"
+                        Height="40"
+                        WindowChrome.IsHitTestVisibleInChrome="True"
+                        Click="OnCloseClick" />
+            </Grid>
+        </Border>
 
-        <TextBlock Grid.Row="1" Grid.Column="0" Text="Source:" VerticalAlignment="Center" Margin="0,0,8,8" />
-        <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Text="{Binding SourceDomain}" VerticalAlignment="Center" Margin="0,0,0,8" />
+        <Grid Grid.Row="1" Margin="16,14,16,14">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
 
-        <TextBlock Grid.Row="2" Grid.Column="0" Text="Size:" VerticalAlignment="Center" Margin="0,0,8,8" />
-        <TextBlock Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" Text="{Binding SizeDisplay}" VerticalAlignment="Center" Margin="0,0,0,8" />
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="文件名" VerticalAlignment="Center" Margin="0,0,12,10"
+                       Foreground="{DynamicResource TextSecondaryBrush}" />
+            <TextBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,10"
+                     Text="{Binding FileName, UpdateSourceTrigger=PropertyChanged}" />
 
-        <TextBlock Grid.Row="3" Grid.Column="0" Text="Save to:" VerticalAlignment="Center" Margin="0,0,8,8" />
-        <TextBox Grid.Row="3" Grid.Column="1" Margin="0,0,8,8"
-                 Text="{Binding SaveDirectory, UpdateSourceTrigger=PropertyChanged}" />
-        <Button Grid.Row="3" Grid.Column="2" Content="Browse…" Padding="8,2" Margin="0,0,0,8"
-                Command="{Binding BrowseSaveDirectoryCommand}" />
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="来源" VerticalAlignment="Center" Margin="0,0,12,10"
+                       Foreground="{DynamicResource TextSecondaryBrush}" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Text="{Binding SourceDomain}"
+                       VerticalAlignment="Center" Margin="0,0,0,10" />
 
-        <StackPanel Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button Content="Return to Browser" Padding="10,4" Margin="0,0,8,0" Command="{Binding ReturnToBrowserCommand}" />
-            <Button Content="Cancel" Padding="10,4" Margin="0,0,8,0" Command="{Binding CancelCommand}" />
-            <Button Content="Start Download" Padding="10,4" IsDefault="True" Command="{Binding StartCommand}" />
-        </StackPanel>
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="大小" VerticalAlignment="Center" Margin="0,0,12,10"
+                       Foreground="{DynamicResource TextSecondaryBrush}" />
+            <TextBlock Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" Text="{Binding SizeDisplay}"
+                       VerticalAlignment="Center" Margin="0,0,0,10" />
+
+            <TextBlock Grid.Row="3" Grid.Column="0" Text="保存到" VerticalAlignment="Center" Margin="0,0,12,10"
+                       Foreground="{DynamicResource TextSecondaryBrush}" />
+            <TextBox Grid.Row="3" Grid.Column="1" Margin="0,0,8,10"
+                     Text="{Binding SaveDirectory, UpdateSourceTrigger=PropertyChanged}" />
+            <Button Grid.Row="3" Grid.Column="2" Content="浏览…" Margin="0,0,0,10"
+                    Command="{Binding BrowseSaveDirectoryCommand}" />
+
+            <StackPanel Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="交回浏览器" Margin="0,0,8,0" Command="{Binding ReturnToBrowserCommand}" />
+                <Button Content="取消" Margin="0,0,8,0" Command="{Binding CancelCommand}" />
+                <Button Content="开始下载" Style="{StaticResource AccentButton}" IsDefault="True"
+                        Command="{Binding StartCommand}" />
+            </StackPanel>
+        </Grid>
     </Grid>
 </Window>

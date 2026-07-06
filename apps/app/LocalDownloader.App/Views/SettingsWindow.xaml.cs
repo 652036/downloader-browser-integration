@@ -15,4 +15,9 @@ public partial class SettingsWindow : Window
 
         viewModel.RequestClose += () => Dispatcher.Invoke(Close);
     }
+
+    private void OnCloseClick(object sender, RoutedEventArgs e)
+    {
+        SystemCommands.CloseWindow(this);
+    }
 }

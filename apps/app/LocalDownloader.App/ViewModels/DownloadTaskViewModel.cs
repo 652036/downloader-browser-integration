@@ -7,7 +7,7 @@ namespace LocalDownloader.App.ViewModels;
 
 /// <summary>
 /// Presentation wrapper around a <see cref="ManagedDownloadTask"/> for the main window's
-/// DataGrid. Speed and ETA are derived from the delta between successive progress updates,
+/// card list. Speed and ETA are derived from the delta between successive progress updates,
 /// which the caller applies via <see cref="ApplyFrom"/> at the throttled UI refresh cadence.
 /// </summary>
 public sealed partial class DownloadTaskViewModel : ObservableObject
@@ -18,6 +18,7 @@ public sealed partial class DownloadTaskViewModel : ObservableObject
     public string Id { get; }
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(TypeGlyph))]
     private string _fileName = string.Empty;
 
     [ObservableProperty]
@@ -37,6 +38,11 @@ public sealed partial class DownloadTaskViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(StatusDisplay))]
     [NotifyPropertyChangedFor(nameof(SpeedDisplay))]
     [NotifyPropertyChangedFor(nameof(EtaDisplay))]
+    [NotifyPropertyChangedFor(nameof(SegmentDisplay))]
+    [NotifyPropertyChangedFor(nameof(CanPause))]
+    [NotifyPropertyChangedFor(nameof(CanResume))]
+    [NotifyPropertyChangedFor(nameof(CanCancel))]
+    [NotifyPropertyChangedFor(nameof(IsFailed))]
     private DownloadTaskStatus _status;
 
     [ObservableProperty]
@@ -50,6 +56,10 @@ public sealed partial class DownloadTaskViewModel : ObservableObject
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(StatusDisplay))]
     private string? _errorMessage;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SegmentDisplay))]
+    private int _segmentCount;
 
     public DownloadTaskViewModel(ManagedDownloadTask task)
     {
@@ -66,6 +76,7 @@ public sealed partial class DownloadTaskViewModel : ObservableObject
         FilePath = task.FilePath;
         Status = task.Status;
         ErrorMessage = task.ErrorMessage;
+        SegmentCount = task.SegmentCount;
 
         var now = DateTimeOffset.UtcNow;
         var elapsed = (now - _lastSampleAt).TotalSeconds;
@@ -84,17 +95,17 @@ public sealed partial class DownloadTaskViewModel : ObservableObject
         BytesDownloaded = task.BytesDownloaded;
     }
 
-    public string SizeDisplay => TotalBytes is > 0 ? FormatBytes(TotalBytes.Value) : "Unknown";
+    public string SizeDisplay => TotalBytes is > 0 ? FormatBytes(TotalBytes.Value) : "大小未知";
 
     public double ProgressPercent => TotalBytes is > 0 ? Math.Min(100.0, BytesDownloaded * 100.0 / TotalBytes.Value) : 0;
 
     public string ProgressDisplay => TotalBytes is > 0
-        ? $"{ProgressPercent:0.0}% ({FormatBytes(BytesDownloaded)} / {FormatBytes(TotalBytes.Value)})"
+        ? $"{ProgressPercent:0}% · {FormatBytes(BytesDownloaded)} / {FormatBytes(TotalBytes.Value)}"
         : FormatBytes(BytesDownloaded);
 
     public string SpeedDisplay => Status == DownloadTaskStatus.Downloading && BytesPerSecond > 0
         ? $"{FormatBytes((long)BytesPerSecond)}/s"
-        : "-";
+        : string.Empty;
 
     public string EtaDisplay
     {
@@ -102,31 +113,86 @@ public sealed partial class DownloadTaskViewModel : ObservableObject
         {
             if (Status != DownloadTaskStatus.Downloading || BytesPerSecond <= 0 || TotalBytes is not > 0)
             {
-                return "-";
+                return string.Empty;
             }
 
             var remaining = TotalBytes.Value - BytesDownloaded;
             if (remaining <= 0)
             {
-                return "0s";
+                return FormatEta(0);
             }
 
-            var seconds = remaining / BytesPerSecond;
-            return TimeSpan.FromSeconds(seconds).ToString(@"hh\:mm\:ss");
+            return FormatEta(remaining / BytesPerSecond);
         }
     }
 
+    /// <summary>剩余时间中文格式：小于 60 秒“剩余 X 秒”，小于 1 小时“剩余 X 分 Y 秒”，更长“剩余 hh:mm:ss”。</summary>
+    public static string FormatEta(double seconds)
+    {
+        if (seconds < 0 || double.IsNaN(seconds) || double.IsInfinity(seconds))
+        {
+            return string.Empty;
+        }
+
+        var total = (long)Math.Round(seconds);
+        if (total < 60)
+        {
+            return $"剩余 {total} 秒";
+        }
+
+        if (total < 3600)
+        {
+            return $"剩余 {total / 60} 分 {total % 60} 秒";
+        }
+
+        return $"剩余 {TimeSpan.FromSeconds(total):hh\\:mm\\:ss}";
+    }
+
+    public string SegmentDisplay => Status == DownloadTaskStatus.Downloading && SegmentCount > 0
+        ? $"{SegmentCount} 线程"
+        : string.Empty;
+
     public string StatusDisplay => Status switch
     {
-        DownloadTaskStatus.Queued => "Queued",
-        DownloadTaskStatus.Probing => "Probing",
-        DownloadTaskStatus.Downloading => "Downloading",
-        DownloadTaskStatus.Paused => "Paused",
-        DownloadTaskStatus.Completed => "Completed",
-        DownloadTaskStatus.Failed => $"Failed{(ErrorMessage is null ? "" : $": {ErrorMessage}")}",
-        DownloadTaskStatus.Canceled => "Canceled",
+        DownloadTaskStatus.Queued => "排队中",
+        DownloadTaskStatus.Probing => "连接中",
+        DownloadTaskStatus.Downloading => "下载中",
+        DownloadTaskStatus.Paused => "已暂停",
+        DownloadTaskStatus.Completed => "已完成",
+        DownloadTaskStatus.Failed => $"失败{(ErrorMessage is null ? "" : $"：{ErrorMessage}")}",
+        DownloadTaskStatus.Canceled => "已取消",
         _ => Status.ToString()
     };
+
+    public bool IsFailed => Status == DownloadTaskStatus.Failed;
+
+    /// <summary>暂停按钮可见：任务正在推进（排队/连接/下载）。</summary>
+    public bool CanPause => Status is DownloadTaskStatus.Queued
+        or DownloadTaskStatus.Probing
+        or DownloadTaskStatus.Downloading;
+
+    /// <summary>继续按钮可见：任务停在可恢复状态（与 DownloadManagerService.ResumeTask 一致）。</summary>
+    public bool CanResume => Status is DownloadTaskStatus.Paused or DownloadTaskStatus.Failed;
+
+    public bool CanCancel => Status is not DownloadTaskStatus.Completed and not DownloadTaskStatus.Canceled;
+
+    /// <summary>按扩展名给卡片选一个 Segoe MDL2 Assets 类型图标。</summary>
+    public string TypeGlyph
+    {
+        get
+        {
+            var extension = Path.GetExtension(FileName).ToLowerInvariant();
+            return extension switch
+            {
+                ".mp4" or ".mkv" or ".avi" or ".mov" or ".wmv" or ".flv" or ".webm" => "",
+                ".mp3" or ".flac" or ".wav" or ".aac" or ".ogg" or ".m4a" => "",
+                ".jpg" or ".jpeg" or ".png" or ".gif" or ".bmp" or ".webp" or ".svg" => "",
+                ".pdf" or ".doc" or ".docx" or ".xls" or ".xlsx" or ".ppt" or ".pptx" or ".txt" => "",
+                ".exe" or ".msi" => "",
+                _ => ""
+            };
+        }
+    }
 
     private static string? UrlFileName(string? url)
     {

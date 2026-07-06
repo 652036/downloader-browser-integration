@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Windows.Data;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -10,8 +12,18 @@ using LocalDownloader.Core.Segments;
 
 namespace LocalDownloader.App.ViewModels;
 
+/// <summary>主窗口左侧导航的分区。</summary>
+public enum TaskSection
+{
+    /// <summary>下载中：所有非已完成的任务。</summary>
+    Active,
+
+    /// <summary>已完成的任务。</summary>
+    Completed
+}
+
 /// <summary>
-/// Backs the main window's DataGrid and toolbar. Progress from
+/// Backs the main window's card list and toolbar. Progress from
 /// <see cref="DownloadManagerService.TaskChanged"/> arrives on background threads and can fire
 /// very frequently (once per segment progress persist), so updates are coalesced and flushed
 /// to the UI thread at most every 250ms via a DispatcherTimer, per the design doc.
@@ -26,11 +38,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     public ObservableCollection<DownloadTaskViewModel> Tasks { get; } = new();
 
-    [ObservableProperty]
-    private DownloadTaskViewModel? _selectedTask;
+    /// <summary>按 <see cref="SelectedSection"/> 过滤后的视图，卡片列表绑定这里。</summary>
+    public ICollectionView TasksView { get; }
 
     [ObservableProperty]
     private string _newTaskUrl = string.Empty;
+
+    [ObservableProperty]
+    private TaskSection _selectedSection = TaskSection.Active;
 
     public MainViewModel(DownloadManagerService downloadManager)
     {
@@ -42,6 +57,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             Tasks.Add(new DownloadTaskViewModel(task));
         }
 
+        TasksView = CollectionViewSource.GetDefaultView(Tasks);
+        TasksView.Filter = MatchesSection;
+
         _downloadManager.TaskChanged += OnTaskChanged;
 
         _refreshTimer = new DispatcherTimer(DispatcherPriority.Background, _dispatcher)
@@ -51,6 +69,30 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _refreshTimer.Tick += (_, _) => FlushDirtyTasks();
         _refreshTimer.Start();
     }
+
+    /// <summary>当前分区是否包含该任务：下载中=非已完成的全部；已完成=Completed。</summary>
+    public bool MatchesSection(object? item)
+    {
+        if (item is not DownloadTaskViewModel task)
+        {
+            return false;
+        }
+
+        return SelectedSection == TaskSection.Completed
+            ? task.Status == DownloadTaskStatus.Completed
+            : task.Status != DownloadTaskStatus.Completed;
+    }
+
+    partial void OnSelectedSectionChanged(TaskSection value)
+    {
+        TasksView.Refresh();
+    }
+
+    [RelayCommand]
+    private void ShowActiveSection() => SelectedSection = TaskSection.Active;
+
+    [RelayCommand]
+    private void ShowCompletedSection() => SelectedSection = TaskSection.Completed;
 
     private void OnTaskChanged(ManagedDownloadTask task)
     {
@@ -74,6 +116,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             _dirtyTaskIds.Clear();
         }
 
+        var sectionMembershipChanged = false;
+
         foreach (var id in dirtyIds)
         {
             if (!_downloadManager.TryGetTask(id, out var task))
@@ -94,8 +138,19 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             }
             else
             {
+                var wasCompleted = viewModel.Status == DownloadTaskStatus.Completed;
                 viewModel.ApplyFrom(task);
+                if (wasCompleted != (viewModel.Status == DownloadTaskStatus.Completed))
+                {
+                    sectionMembershipChanged = true;
+                }
             }
+        }
+
+        // 只有任务在“下载中/已完成”分区之间迁移时才刷新视图，避免高频 Refresh 反复重建卡片。
+        if (sectionMembershipChanged)
+        {
+            TasksView.Refresh();
         }
     }
 
@@ -124,51 +179,52 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     }
 
     [RelayCommand]
-    private void PauseSelected()
+    private void PauseTask(DownloadTaskViewModel? task)
     {
-        if (SelectedTask is not null)
+        if (task is not null)
         {
-            _downloadManager.PauseTask(SelectedTask.Id);
+            _downloadManager.PauseTask(task.Id);
         }
     }
 
     [RelayCommand]
-    private void ResumeSelected()
+    private void ResumeTask(DownloadTaskViewModel? task)
     {
-        if (SelectedTask is not null)
+        if (task is not null)
         {
-            _downloadManager.ResumeTask(SelectedTask.Id);
+            _downloadManager.ResumeTask(task.Id);
         }
     }
 
     [RelayCommand]
-    private void CancelSelected()
+    private void CancelTask(DownloadTaskViewModel? task)
     {
-        if (SelectedTask is not null)
+        if (task is not null)
         {
-            _downloadManager.CancelTask(SelectedTask.Id);
+            _downloadManager.CancelTask(task.Id);
         }
     }
 
     [RelayCommand]
-    private void DeleteSelected()
+    private void DeleteTask(DownloadTaskViewModel? task)
     {
-        if (SelectedTask is not null)
+        if (task is null)
         {
-            var id = SelectedTask.Id;
-            _downloadManager.RemoveTask(id, deleteFile: false);
-            var viewModel = Tasks.FirstOrDefault(t => t.Id == id);
-            if (viewModel is not null)
-            {
-                Tasks.Remove(viewModel);
-            }
+            return;
+        }
+
+        _downloadManager.RemoveTask(task.Id, deleteFile: false);
+        var viewModel = Tasks.FirstOrDefault(t => t.Id == task.Id);
+        if (viewModel is not null)
+        {
+            Tasks.Remove(viewModel);
         }
     }
 
     [RelayCommand]
-    private void OpenContainingFolder()
+    private void OpenFolder(DownloadTaskViewModel? task)
     {
-        if (SelectedTask?.FilePath is not { } filePath)
+        if (task?.FilePath is not { } filePath)
         {
             return;
         }
@@ -188,6 +244,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             Process.Start("explorer.exe", $"\"{directory}\"");
         }
     }
+
+    [RelayCommand]
+    private void PauseAll() => _downloadManager.PauseAll();
+
+    [RelayCommand]
+    private void ResumeAll() => _downloadManager.ResumeAll();
 
     public void Dispose()
     {

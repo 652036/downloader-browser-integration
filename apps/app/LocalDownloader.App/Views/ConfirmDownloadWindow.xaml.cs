@@ -19,4 +19,10 @@ public partial class ConfirmDownloadWindow : Window
 
         viewModel.RequestClose += () => Dispatcher.Invoke(Close);
     }
+
+    private void OnCloseClick(object sender, RoutedEventArgs e)
+    {
+        // 直接关窗等同取消（ViewModel 默认 Outcome 为 Cancel）。
+        SystemCommands.CloseWindow(this);
+    }
 }

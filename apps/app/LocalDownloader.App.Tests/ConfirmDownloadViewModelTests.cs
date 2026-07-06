@@ -34,7 +34,7 @@ public sealed class ConfirmDownloadViewModelTests
         var viewModel = new ConfirmDownloadViewModel(request, @"C:\Downloads");
 
         Assert.Equal("report.pdf", viewModel.FileName);
-        Assert.Equal("Unknown size", viewModel.SizeDisplay);
+        Assert.Equal("大小未知", viewModel.SizeDisplay);
     }
 
     [Fact]

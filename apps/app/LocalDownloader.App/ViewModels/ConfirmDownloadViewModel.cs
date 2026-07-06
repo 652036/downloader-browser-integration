@@ -103,14 +103,14 @@ public sealed partial class ConfirmDownloadViewModel : ObservableObject
 
     private static string ResolveDomain(string? url)
     {
-        return Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host : "unknown";
+        return Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host : "未知来源";
     }
 
     private static string FormatSize(long? bytes)
     {
         if (bytes is not > 0)
         {
-            return "Unknown size";
+            return "大小未知";
         }
 
         string[] units = { "B", "KB", "MB", "GB", "TB" };
