@@ -21,6 +21,8 @@ public partial class App : System.Windows.Application
     private MainWindow? _mainWindow;
     private MainViewModel? _mainViewModel;
     private SettingsWindow? _settingsWindow;
+    private ClipboardWatcherService? _clipboardWatcher;
+    private readonly ClipboardDedupeTracker _clipboardDedupeTracker = new();
 
     private readonly Queue<DownloadRequest> _pendingConfirmations = new();
     private readonly object _confirmLock = new();
@@ -69,6 +71,26 @@ public partial class App : System.Windows.Application
         _trayIcon.ResumeAllRequested += () => DownloadManager.ResumeAll();
         _trayIcon.ExitRequested += ExitApplication;
         _trayIcon.Initialize();
+
+        _clipboardWatcher = new ClipboardWatcherService(
+            _clipboardDedupeTracker,
+            () => SettingsStore.Load().InterceptExtensions,
+            () => SettingsStore.Load().WatchClipboard);
+        _clipboardWatcher.DownloadUrlDetected += OnClipboardDownloadUrlDetected;
+        _clipboardWatcher.Start();
+    }
+
+    private void OnClipboardDownloadUrlDetected(string url)
+    {
+        var request = new DownloadRequest
+        {
+            Type = IpcMessageType.DownloadCreate,
+            Id = Guid.NewGuid().ToString("N"),
+            Url = url,
+            Source = "clipboard"
+        };
+
+        OnDownloadRequested(request);
     }
 
     private void OnDownloadRequested(DownloadRequest request)
@@ -119,6 +141,14 @@ public partial class App : System.Windows.Application
 
                 case ConfirmDownloadOutcome.Cancel:
                 default:
+                    // A canceled clipboard-detected URL must not be offered again (design:
+                    // "弹窗被取消的 URL 不再重复弹"); browser-sourced cancellations are harmless
+                    // no-ops here since they never populate the dedupe tracker in the first place.
+                    if (next.Url is not null)
+                    {
+                        _clipboardDedupeTracker.MarkCanceled(next.Url);
+                    }
+
                     break;
             }
 
@@ -188,6 +218,7 @@ public partial class App : System.Windows.Application
         // Pause outstanding work and flush state before tearing down (design: "退出时未完成任务先暂停落盘").
         DownloadManager?.PauseAll();
 
+        _clipboardWatcher?.Dispose();
         _trayIcon?.Dispose();
         _pipeServer?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(2));
         _httpClient?.Dispose();
@@ -200,6 +231,7 @@ public partial class App : System.Windows.Application
     {
         if (!IsExiting)
         {
+            _clipboardWatcher?.Dispose();
             _trayIcon?.Dispose();
             _instanceGuard?.Dispose();
         }
