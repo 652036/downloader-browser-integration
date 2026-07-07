@@ -23,6 +23,20 @@ public sealed class AppSettings
     [JsonPropertyName("launchAtStartup")]
     public bool LaunchAtStartup { get; set; }
 
+    /// <summary>When true, new tasks default to a save directory of
+    /// <c>DownloadDirectory\&lt;分类名&gt;</c> based on the file's extension (see
+    /// <see cref="LocalDownloader.Core.FileCategoryClassifier"/>) instead of DownloadDirectory
+    /// itself. The confirmation popup pre-fills this categorized path; the user can still
+    /// override it per task.</summary>
+    [JsonPropertyName("categorizeByType")]
+    public bool CategorizeByType { get; set; } = true;
+
+    /// <summary>When true, the App watches the clipboard for http/https URLs whose extension
+    /// matches <see cref="InterceptExtensions"/> and offers the same confirmation popup used for
+    /// browser-intercepted downloads (source "clipboard").</summary>
+    [JsonPropertyName("watchClipboard")]
+    public bool WatchClipboard { get; set; } = true;
+
     public static string DefaultDownloadDirectory()
     {
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);

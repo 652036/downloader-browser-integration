@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="设置"
-        Height="500" Width="560"
+        Height="560" Width="560"
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize"
         Background="{DynamicResource WindowBgBrush}"
@@ -48,6 +48,8 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
@@ -77,14 +79,20 @@
             <CheckBox Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="3" Content="开机自启动" Margin="0,2,0,12"
                       IsChecked="{Binding LaunchAtStartup}" />
 
-            <TextBlock Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" Text="拦截的文件类型（每行一个扩展名）" Margin="0,0,0,6"
+            <CheckBox Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" Content="按类型分类保存（压缩包/程序/视频/音乐/文档/其他）" Margin="0,0,0,12"
+                      IsChecked="{Binding CategorizeByType}" />
+
+            <CheckBox Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" Content="监听剪贴板中的下载链接" Margin="0,0,0,12"
+                      IsChecked="{Binding WatchClipboard}" />
+
+            <TextBlock Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="3" Text="拦截的文件类型（每行一个扩展名）" Margin="0,0,0,6"
                        Foreground="{DynamicResource TextSecondaryBrush}" />
-            <TextBox Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" Margin="0,0,0,12"
+            <TextBox Grid.Row="7" Grid.Column="0" Grid.ColumnSpan="3" Margin="0,0,0,12"
                      AcceptsReturn="True" VerticalScrollBarVisibility="Auto" TextWrapping="NoWrap"
                      VerticalContentAlignment="Top"
                      Text="{Binding InterceptExtensionsText, UpdateSourceTrigger=PropertyChanged}" />
 
-            <StackPanel Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Right">
+            <StackPanel Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Content="取消" Margin="0,0,8,0" Command="{Binding CancelCommand}" />
                 <Button Content="保存" Style="{StaticResource AccentButton}" IsDefault="True"
                         Command="{Binding SaveCommand}" />

@@ -99,7 +99,7 @@ public partial class App : System.Windows.Application
         }
 
         var settings = SettingsStore.Load();
-        var viewModel = new ConfirmDownloadViewModel(next, settings.DownloadDirectory);
+        var viewModel = new ConfirmDownloadViewModel(next, settings.DownloadDirectory, settings.CategorizeByType);
         var window = new ConfirmDownloadWindow(viewModel);
 
         window.Closed += (_, _) =>
@@ -109,7 +109,7 @@ public partial class App : System.Windows.Application
                 case ConfirmDownloadOutcome.Start:
                     var request = viewModel.Request;
                     request.SuggestedFilename = viewModel.FileName;
-                    DownloadManager?.CreateTask(request);
+                    DownloadManager?.CreateTask(request, viewModel.SaveDirectory);
                     ShowMainWindow();
                     break;
 

@@ -34,6 +34,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private bool _launchAtStartup;
 
+    [ObservableProperty]
+    private bool _categorizeByType;
+
+    [ObservableProperty]
+    private bool _watchClipboard;
+
     public SettingsViewModel(SettingsStore settingsStore)
     {
         _settingsStore = settingsStore;
@@ -44,6 +50,8 @@ public sealed partial class SettingsViewModel : ObservableObject
         _maxConcurrentTasks = settings.MaxConcurrentTasks;
         _interceptExtensionsText = string.Join(Environment.NewLine, settings.InterceptExtensions);
         _launchAtStartup = settings.LaunchAtStartup;
+        _categorizeByType = settings.CategorizeByType;
+        _watchClipboard = settings.WatchClipboard;
     }
 
     [RelayCommand]
@@ -72,7 +80,9 @@ public sealed partial class SettingsViewModel : ObservableObject
             MaxConcurrentTasks = Math.Max(1, MaxConcurrentTasks),
             InterceptExtensions = ParseExtensions(InterceptExtensionsText),
             InterceptMimePrefixes = AppSettings.DefaultInterceptMimePrefixes(),
-            LaunchAtStartup = LaunchAtStartup
+            LaunchAtStartup = LaunchAtStartup,
+            CategorizeByType = CategorizeByType,
+            WatchClipboard = WatchClipboard
         };
 
         _settingsStore.Save(settings);

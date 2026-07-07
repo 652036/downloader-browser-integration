@@ -15,6 +15,11 @@ public sealed class ManagedDownloadTask
 
     public DownloadTaskStatus Status { get; set; } = DownloadTaskStatus.Queued;
 
+    /// <summary>Per-task save directory chosen in the confirmation popup (or a clipboard/manual
+    /// task's equivalent). When null, <see cref="Services.DownloadManagerService"/> falls back
+    /// to the global <see cref="Settings.AppSettings.DownloadDirectory"/>.</summary>
+    public string? OutputDirectory { get; set; }
+
     public string? FilePath { get; set; }
 
     public long BytesDownloaded { get; set; }

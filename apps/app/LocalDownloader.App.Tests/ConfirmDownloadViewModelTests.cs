@@ -1,3 +1,4 @@
+using System.IO;
 using LocalDownloader.App.ViewModels;
 using LocalDownloader.Core;
 
@@ -5,6 +6,35 @@ namespace LocalDownloader.App.Tests;
 
 public sealed class ConfirmDownloadViewModelTests
 {
+    [Fact]
+    public void Constructor_prefills_categorized_directory_when_categorize_by_type_enabled()
+    {
+        var request = new DownloadRequest
+        {
+            Url = "https://example.com/movie.mp4",
+            SuggestedFilename = "movie.mp4"
+        };
+
+        var viewModel = new ConfirmDownloadViewModel(request, @"C:\Downloads\LocalDownloader", categorizeByType: true);
+
+        Assert.Equal(Path.Combine(@"C:\Downloads\LocalDownloader", FileCategoryClassifier.Video), viewModel.SaveDirectory);
+    }
+
+    [Fact]
+    public void Constructor_uses_plain_default_directory_when_categorize_by_type_disabled()
+    {
+        var request = new DownloadRequest
+        {
+            Url = "https://example.com/movie.mp4",
+            SuggestedFilename = "movie.mp4"
+        };
+
+        var viewModel = new ConfirmDownloadViewModel(request, @"C:\Downloads\LocalDownloader", categorizeByType: false);
+
+        Assert.Equal(@"C:\Downloads\LocalDownloader", viewModel.SaveDirectory);
+    }
+
+
     [Fact]
     public void Constructor_derives_filename_domain_and_size_from_request()
     {

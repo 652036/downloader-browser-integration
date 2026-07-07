@@ -60,6 +60,7 @@ public sealed class DownloadManagerService
                 },
                 Status = DownloadTaskStatus.Paused,
                 FilePath = record.FilePath,
+                OutputDirectory = record.OutputDirectory,
                 BytesDownloaded = record.BytesDownloaded,
                 TotalBytes = record.TotalBytes,
                 CreatedAt = record.CreatedAt,
@@ -71,10 +72,10 @@ public sealed class DownloadManagerService
         }
     }
 
-    public ManagedDownloadTask CreateTask(DownloadRequest request)
+    public ManagedDownloadTask CreateTask(DownloadRequest request, string? outputDirectory = null)
     {
         var id = string.IsNullOrWhiteSpace(request.Id) ? Guid.NewGuid().ToString("N") : request.Id!;
-        var task = new ManagedDownloadTask { Id = id, Request = request };
+        var task = new ManagedDownloadTask { Id = id, Request = request, OutputDirectory = outputDirectory };
         _tasks[id] = task;
         Enqueue(id);
         PersistAll();
@@ -201,7 +202,7 @@ public sealed class DownloadManagerService
 
         var options = new SegmentedDownloadOptions
         {
-            OutputDirectory = settings.DownloadDirectory,
+            OutputDirectory = string.IsNullOrWhiteSpace(task.OutputDirectory) ? settings.DownloadDirectory : task.OutputDirectory,
             Connections = settings.ConnectionsPerTask
         };
 
@@ -256,6 +257,7 @@ public sealed class DownloadManagerService
             UserAgent = t.Request.UserAgent,
             Status = t.Status.ToString().ToLowerInvariant(),
             FilePath = t.FilePath,
+            OutputDirectory = t.OutputDirectory,
             TotalBytes = t.TotalBytes,
             BytesDownloaded = t.BytesDownloaded,
             CreatedAt = t.CreatedAt,

@@ -39,12 +39,19 @@ public sealed partial class ConfirmDownloadViewModel : ObservableObject
     private string _saveDirectory;
 
     public ConfirmDownloadViewModel(DownloadRequest request, string defaultSaveDirectory)
+        : this(request, defaultSaveDirectory, categorizeByType: false)
+    {
+    }
+
+    public ConfirmDownloadViewModel(DownloadRequest request, string defaultSaveDirectory, bool categorizeByType)
     {
         Request = request;
         _fileName = ResolveInitialFileName(request);
         _sourceDomain = ResolveDomain(request.Url);
         _sizeDisplay = FormatSize(request.FileSize);
-        _saveDirectory = defaultSaveDirectory;
+        _saveDirectory = categorizeByType
+            ? Path.Combine(defaultSaveDirectory, FileCategoryClassifier.Classify(_fileName))
+            : defaultSaveDirectory;
     }
 
     [RelayCommand]

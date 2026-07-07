@@ -32,6 +32,11 @@ public sealed class PersistedTaskRecord
     [JsonPropertyName("filePath")]
     public string? FilePath { get; set; }
 
+    /// <summary>Per-task save directory chosen at confirmation time, if any. Null means the
+    /// task follows whatever the global download directory is at resume time.</summary>
+    [JsonPropertyName("outputDirectory")]
+    public string? OutputDirectory { get; set; }
+
     [JsonPropertyName("totalBytes")]
     public long? TotalBytes { get; set; }
 
