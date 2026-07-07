@@ -2,6 +2,13 @@
 
 Local Downloader is an IDM-style download manager for Windows that takes over Chrome and Microsoft Edge downloads. A MV3 browser extension intercepts matching downloads (by file extension or MIME type), cancels the browser download, and hands the URL — together with the cookie header, referrer, and user agent — to a resident WPF desktop app that downloads it with a multi-connection segmented engine supporting pause, resume, and crash recovery.
 
+Key features:
+
+- **Dynamic segmentation (work stealing)**: downloads run on a pool of worker connections pulling from a shared segment queue instead of one static task per segment. An idle worker whose queue is empty splits the largest remaining in-flight segment (once it has more than 4MB left) so no connection sits idle just because the initial split was uneven.
+- **Rate-limit self-throttling**: a worker that gets 403/418/429 or a refused connection backs off (2s/4s/8s… up to 30s) and puts its segment back on the queue instead of burning through retries — an automatic concurrency downgrade against throttled servers. The task only fails if every worker is simultaneously backed off with zero progress for 60 seconds straight.
+- **Categorized save directories**: new downloads default to `Downloads\LocalDownloader\<分类>` (压缩包/程序/视频/音乐/文档/其他) based on file extension; toggle this off, or override the folder per download, in the confirmation popup or Settings.
+- **Clipboard link watching**: copying an http/https link whose extension matches the intercept list pops the same IDM-style confirmation window used for browser downloads (source "clipboard"), with a 10-minute per-URL dedupe and permanent suppression once a link is canceled.
+
 ## Architecture
 
 ```
@@ -20,8 +27,8 @@ LocalDownloader.App   — resident WPF app (tray icon, single instance)
 
 - The Host does no business parsing; it relays frames between stdio and the pipe, and launches `LocalDownloader.App.exe` from its own directory when the pipe is not listening (500ms retries, 5s timeout). If the App cannot be reached it returns `download.error` so the extension fails open to a normal browser download.
 - The App is a single instance (`Local\LocalDownloader.App.SingleInstance` mutex). Closing the main window minimizes to the tray; only the tray Exit menu quits (pausing and persisting unfinished tasks first).
-- The engine probes with `Range: bytes=0-0`. Range-capable downloads are split into up to 32 segments (default 8; segments never smaller than 256KB), written by independent connections into a preallocated `.part` file, with per-segment progress persisted to `<file>.task.json` for resume. Servers without Range support fall back to a single stream.
-- Downloads land in `Downloads\LocalDownloader` by default. Settings live in `%APPDATA%\LocalDownloader\settings.json`, the task registry in `%APPDATA%\LocalDownloader\tasks.json` (never contains cookies), and Host diagnostics in `%LOCALAPPDATA%\LocalDownloader\logs\`.
+- The engine probes with `Range: bytes=0-0`. Range-capable downloads are split into up to 32 segments (default 8; segments never smaller than 256KB) and handed to a pool of worker connections that pull from a shared queue, written into a preallocated `.part` file, with per-segment progress persisted to `<file>.task.json` for resume. An idle worker with an empty queue steals half of the largest remaining in-flight segment instead of sitting idle; a worker that hits a rate limit backs off and requeues its segment rather than holding a connection open. Servers without Range support fall back to a single stream.
+- Downloads land in `Downloads\LocalDownloader` by default, categorized into a subfolder by file type unless disabled in Settings; each task can also have its own save folder (set per download in the confirmation popup). Settings live in `%APPDATA%\LocalDownloader\settings.json`, the task registry in `%APPDATA%\LocalDownloader\tasks.json` (never contains cookies), and Host diagnostics in `%LOCALAPPDATA%\LocalDownloader\logs\`.
 
 ## Projects
 
