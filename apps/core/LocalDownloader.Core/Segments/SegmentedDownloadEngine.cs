@@ -5,9 +5,10 @@ namespace LocalDownloader.Core.Segments;
 
 /// <summary>
 /// Multi-connection, resumable download engine. Probes the server for Range support, splits
-/// the resource into N segments when possible, downloads each segment on its own HTTP
-/// connection into a preallocated `.part` file, and periodically persists progress to a
-/// `.task.json` sidecar so an interrupted download can resume from where it left off.
+/// the resource into N segments when possible, downloads segments using a pool of N worker
+/// "lanes" that pull from a shared queue (work stealing: an idle worker splits the largest
+/// remaining in-flight segment rather than sitting idle), and periodically persists progress to
+/// a `.task.json` sidecar so an interrupted download can resume from where it left off.
 /// Falls back to a single-stream download when the server does not support Range requests
 /// or the total size is unknown.
 /// </summary>
@@ -15,6 +16,17 @@ public sealed class SegmentedDownloadEngine
 {
     private readonly HttpClient _httpClient;
     private readonly SegmentProgressStore _progressStore;
+
+    /// <summary>Minimum remaining bytes a running segment must have before it is eligible to be
+    /// split off for a newly idle worker.</summary>
+    private const long MinSplitRemainingBytes = 4 * 1024 * 1024;
+
+    /// <summary>How long the whole task can go with zero global progress, while every worker is
+    /// in a rate-limit backoff wait, before the task is declared failed.</summary>
+    private static readonly TimeSpan StallFailureWindow = TimeSpan.FromSeconds(60);
+
+    private static readonly TimeSpan MinBackoffDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan MaxBackoffDelay = TimeSpan.FromSeconds(30);
 
     public SegmentedDownloadEngine(HttpClient httpClient)
         : this(httpClient, new SegmentProgressStore())
@@ -165,70 +177,214 @@ public sealed class SegmentedDownloadEngine
     {
         var uri = new Uri(request.Url!);
         var throttle = new PersistThrottle(options.PersistInterval, options.PersistByteInterval);
+        var workerCount = Math.Max(1, Math.Min(options.Connections, state.Segments.Count));
+        var coordinator = new WorkStealingCoordinator(state, progress, throttle, workerCount);
 
-        var tasks = state.Segments
-            .Where(segment => !segment.IsComplete)
-            .Select(segment => DownloadSegmentWithRetryAsync(uri, request, state, segment, options, progress, throttle, cancellationToken))
+        // Every worker beyond the number of not-yet-complete segments will simply find the
+        // queue empty and immediately attempt a work-steal split, which is the desired behavior
+        // for lanes that finish early on a job with few segments left.
+        var workers = Enumerable.Range(0, workerCount)
+            .Select(_ => RunWorkerAsync(uri, request, state, options, coordinator, cancellationToken))
             .ToArray();
 
-        await Task.WhenAll(tasks);
+        await Task.WhenAll(workers);
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (coordinator.FailureException is not null)
+        {
+            throw coordinator.FailureException;
+        }
+
         await _progressStore.SaveAsync(state, CancellationToken.None);
     }
 
+    private async Task RunWorkerAsync(
+        Uri uri,
+        DownloadRequest request,
+        SegmentedTaskState state,
+        SegmentedDownloadOptions options,
+        WorkStealingCoordinator coordinator,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (coordinator.FailureException is not null)
+            {
+                return;
+            }
+
+            var segment = coordinator.TakeNextSegment();
+            if (segment is null)
+            {
+                // Nothing queued and nothing left to split off of: this worker is done.
+                return;
+            }
+
+            await DownloadSegmentWithRetryAsync(uri, request, state, segment, options, coordinator, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Attempts one segment. Transient (non-rate-limit) failures retry in place a bounded number
+    /// of times with the existing short exponential backoff. Rate-limit responses (403/418/429)
+    /// or refused connections instead put the segment back on the shared queue and send this
+    /// worker into a longer backoff (2s/4s/8s.../30s cap) before it goes looking for new work —
+    /// this both frees the segment up for another (non-throttled) worker immediately and lets
+    /// the throttled worker's own connection slot sit idle, which is the "auto-downgrade
+    /// concurrency" behavior.
+    /// </summary>
     private async Task DownloadSegmentWithRetryAsync(
         Uri uri,
         DownloadRequest request,
         SegmentedTaskState state,
         SegmentProgress segment,
         SegmentedDownloadOptions options,
-        IProgress<DownloadProgressSnapshot>? progress,
-        PersistThrottle throttle,
+        WorkStealingCoordinator coordinator,
         CancellationToken cancellationToken)
     {
-        var attempt = 0;
-        while (true)
+        var transientAttempt = 0;
+
+        if (segment.IsComplete)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            try
+            coordinator.ReleaseSegment(segment);
+            coordinator.NoteProgress();
+            return;
+        }
+
+        try
+        {
+            var outcome = await DownloadSegmentAsync(uri, request, state, segment, coordinator, cancellationToken);
+            coordinator.NoteProgress();
+
+            if (outcome == SegmentOutcome.RateLimited)
             {
-                await DownloadSegmentAsync(uri, request, state, segment, options, progress, throttle, cancellationToken);
+                var backoffStep = coordinator.RegisterRateLimitHit(segment);
+                coordinator.RequeueSegment(segment);
+
+                var delay = ComputeBackoffDelay(backoffStep);
+                coordinator.EnterBackoff();
+                try
+                {
+                    await Task.Delay(delay, cancellationToken);
+                }
+                finally
+                {
+                    coordinator.ExitBackoff();
+                }
+
+                coordinator.CheckForStall();
                 return;
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception) when (attempt < options.MaxRetriesPerSegment)
-            {
-                attempt++;
-                var delay = TimeSpan.FromMilliseconds(options.RetryBaseDelay.TotalMilliseconds * Math.Pow(2, attempt - 1));
-                await Task.Delay(delay, cancellationToken);
-            }
+
+            // Completed or SplitAway: this worker's involvement with this segment object is over.
+            coordinator.ReleaseSegment(segment);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            coordinator.ReleaseSegment(segment);
+            throw;
+        }
+        catch (Exception) when (++transientAttempt <= options.MaxRetriesPerSegment)
+        {
+            var delay = TimeSpan.FromMilliseconds(options.RetryBaseDelay.TotalMilliseconds * Math.Pow(2, transientAttempt - 1));
+            await Task.Delay(delay, cancellationToken);
+            coordinator.RequeueSegment(segment);
+        }
+        catch (Exception ex)
+        {
+            coordinator.ReleaseSegment(segment);
+            coordinator.ReportFailure(ex);
         }
     }
 
-    private async Task DownloadSegmentAsync(
+    private static TimeSpan ComputeBackoffDelay(int step)
+    {
+        var seconds = MinBackoffDelay.TotalSeconds * Math.Pow(2, step - 1);
+        seconds = Math.Min(seconds, MaxBackoffDelay.TotalSeconds);
+        return TimeSpan.FromSeconds(seconds);
+    }
+
+    private static bool IsRateLimited(Exception ex)
+    {
+        if (ex is HttpRequestException httpEx)
+        {
+            if (httpEx.StatusCode is { } status && IsRateLimitStatus(status))
+            {
+                return true;
+            }
+
+            // Connection refused / reset surfaces as HttpRequestException without a status code
+            // (HttpRequestError distinguishes this from a plain unsuccessful status code).
+            if (httpEx.StatusCode is null)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsRateLimitStatus(HttpStatusCode status)
+    {
+        return status is HttpStatusCode.Forbidden // 403
+            or (HttpStatusCode)418
+            or HttpStatusCode.TooManyRequests; // 429
+    }
+
+    private enum SegmentOutcome
+    {
+        Completed,
+        SplitAway,
+        RateLimited
+    }
+
+    private async Task<SegmentOutcome> DownloadSegmentAsync(
         Uri uri,
         DownloadRequest request,
         SegmentedTaskState state,
         SegmentProgress segment,
-        SegmentedDownloadOptions options,
-        IProgress<DownloadProgressSnapshot>? progress,
-        PersistThrottle throttle,
+        WorkStealingCoordinator coordinator,
         CancellationToken cancellationToken)
     {
         var rangeStart = segment.Start + segment.CompletedBytes;
-        if (rangeStart > segment.End)
+        var rangeEnd = segment.End;
+        if (rangeStart > rangeEnd)
         {
-            return;
+            return SegmentOutcome.Completed;
         }
 
         using var requestMessage = new HttpRequestMessage(HttpMethod.Get, uri);
         ApplyRequestHeaders(requestMessage, request);
-        requestMessage.Headers.Range = new RangeHeaderValue(rangeStart, segment.End);
+        requestMessage.Headers.Range = new RangeHeaderValue(rangeStart, rangeEnd);
 
-        using var response = await _httpClient.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        HttpResponseMessage response;
+        try
+        {
+            response = await _httpClient.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        }
+        catch (HttpRequestException ex) when (IsRateLimited(ex))
+        {
+            return SegmentOutcome.RateLimited;
+        }
+
+        using var _ = response;
+
+        if (IsRateLimitStatus(response.StatusCode))
+        {
+            return SegmentOutcome.RateLimited;
+        }
+
+        try
+        {
+            response.EnsureSuccessStatusCode();
+        }
+        catch (HttpRequestException ex) when (IsRateLimited(ex))
+        {
+            return SegmentOutcome.RateLimited;
+        }
 
         await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
         await using var output = new FileStream(state.PartPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
@@ -238,15 +394,36 @@ public sealed class SegmentedDownloadEngine
         int bytesRead;
         while ((bytesRead = await input.ReadAsync(buffer, cancellationToken)) > 0)
         {
-            await output.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
-            segment.CompletedBytes += bytesRead;
+            // Never write past the segment's current End: it may have been shrunk by a
+            // work-stealing split that happened concurrently on another worker.
+            var currentEnd = Volatile.Read(ref segment.EndUnsafe);
+            var position = output.Position;
+            var maxWritable = currentEnd - position + 1;
 
-            if (throttle.ShouldPersist(bytesRead))
+            if (maxWritable <= 0)
             {
-                await _progressStore.SaveAsync(state, CancellationToken.None);
-                progress?.Report(new DownloadProgressSnapshot(state.Id, DownloadTaskStatus.Downloading, state.CompletedBytes, state.TotalBytes, state.Segments.Count));
+                return SegmentOutcome.SplitAway;
+            }
+
+            var toWrite = (int)Math.Min(bytesRead, maxWritable);
+            await output.WriteAsync(buffer.AsMemory(0, toWrite), cancellationToken);
+            segment.CompletedBytes += toWrite;
+            coordinator.NoteProgress();
+
+            if (coordinator.ShouldPersist(toWrite))
+            {
+                await coordinator.PersistAsync(cancellationToken);
+            }
+
+            if (toWrite < bytesRead)
+            {
+                // We were writing right up to a newly-shrunk End: stop, the split owner
+                // continues from here.
+                return SegmentOutcome.SplitAway;
             }
         }
+
+        return SegmentOutcome.Completed;
     }
 
     private async Task DownloadSingleStreamAsync(
@@ -408,6 +585,214 @@ public sealed class SegmentedDownloadEngine
                 _lastPersist = now;
                 _bytesSinceLastPersist = 0;
                 return true;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Coordinates the shared segment queue, work-stealing splits, progress persistence, and
+    /// the "all workers stalled in rate-limit backoff" failure detection for a single task's
+    /// worker pool. All mutation of <see cref="SegmentedTaskState.Segments"/> happens under
+    /// <see cref="_lock"/>.
+    /// </summary>
+    private sealed class WorkStealingCoordinator
+    {
+        private readonly SegmentedTaskState _state;
+        private readonly IProgress<DownloadProgressSnapshot>? _progress;
+        private readonly PersistThrottle _throttle;
+        private readonly SegmentProgressStore _store = new();
+        private readonly int _totalWorkers;
+        private readonly object _lock = new();
+        private readonly Queue<SegmentProgress> _queue = new();
+        private readonly HashSet<SegmentProgress> _inFlight = new();
+        private readonly Dictionary<SegmentProgress, int> _rateLimitHits = new();
+        private int _workersInBackoff;
+        private DateTimeOffset _lastGlobalProgressAt = DateTimeOffset.UtcNow;
+        private long _lastGlobalCompletedBytes;
+
+        public Exception? FailureException { get; private set; }
+
+        public WorkStealingCoordinator(
+            SegmentedTaskState state,
+            IProgress<DownloadProgressSnapshot>? progress,
+            PersistThrottle throttle,
+            int totalWorkers)
+        {
+            _state = state;
+            _progress = progress;
+            _throttle = throttle;
+            _totalWorkers = Math.Max(1, totalWorkers);
+            _lastGlobalCompletedBytes = state.CompletedBytes;
+
+            foreach (var segment in state.Segments.Where(s => !s.IsComplete))
+            {
+                _queue.Enqueue(segment);
+            }
+        }
+
+        /// <summary>
+        /// Returns the next segment for an idle worker to work on: either one waiting in the
+        /// queue, or (if the queue is empty) half of the largest in-flight segment, split at its
+        /// midpoint. Returns null when there is truly nothing left to do.
+        /// </summary>
+        public SegmentProgress? TakeNextSegment()
+        {
+            lock (_lock)
+            {
+                while (_queue.Count > 0)
+                {
+                    var candidate = _queue.Dequeue();
+                    if (candidate.IsComplete)
+                    {
+                        continue;
+                    }
+
+                    _inFlight.Add(candidate);
+                    return candidate;
+                }
+
+                return TrySplitLargestInFlightSegment_NoLock();
+            }
+        }
+
+        private SegmentProgress? TrySplitLargestInFlightSegment_NoLock()
+        {
+            SegmentProgress? largest = null;
+            long largestRemaining = 0;
+
+            foreach (var segment in _inFlight)
+            {
+                var remaining = segment.End - (segment.Start + segment.CompletedBytes) + 1;
+                if (remaining > largestRemaining)
+                {
+                    largestRemaining = remaining;
+                    largest = segment;
+                }
+            }
+
+            if (largest is null || largestRemaining <= MinSplitRemainingBytes)
+            {
+                return null;
+            }
+
+            // Split at the midpoint of the *remaining* (not-yet-downloaded) range.
+            var remainingStart = largest.Start + largest.CompletedBytes;
+            var remainingLength = largest.End - remainingStart + 1;
+            var newSegmentStart = remainingStart + remainingLength / 2;
+
+            var newSegment = new SegmentProgress
+            {
+                Start = newSegmentStart,
+                End = largest.End,
+                CompletedBytes = 0
+            };
+
+            // Shrink the original segment's End so its writer stops before the new segment's
+            // territory. Volatile write so the writer thread observes it on its next buffer check.
+            Volatile.Write(ref largest.EndUnsafe, newSegmentStart - 1);
+
+            _state.Segments.Add(newSegment);
+            _inFlight.Add(newSegment);
+            return newSegment;
+        }
+
+        /// <summary>Worker is done with this segment (completed, or its tail was split away):
+        /// remove it from the in-flight set so it is no longer a split candidate.</summary>
+        public void ReleaseSegment(SegmentProgress segment)
+        {
+            lock (_lock)
+            {
+                _inFlight.Remove(segment);
+                _rateLimitHits.Remove(segment);
+            }
+        }
+
+        /// <summary>Puts a segment back on the shared queue (still in-flight, since it still has
+        /// unfinished bytes) so any idle worker — including this one, on its next loop
+        /// iteration — can pick it up again.</summary>
+        public void RequeueSegment(SegmentProgress segment)
+        {
+            lock (_lock)
+            {
+                _queue.Enqueue(segment);
+            }
+        }
+
+        /// <summary>Records another rate-limit hit against this segment and returns the new hit
+        /// count, used to compute the escalating backoff delay (2s/4s/8s.../30s cap).</summary>
+        public int RegisterRateLimitHit(SegmentProgress segment)
+        {
+            lock (_lock)
+            {
+                var next = _rateLimitHits.GetValueOrDefault(segment) + 1;
+                _rateLimitHits[segment] = next;
+                return next;
+            }
+        }
+
+        public void NoteProgress()
+        {
+            lock (_lock)
+            {
+                var completed = _state.CompletedBytes;
+                if (completed != _lastGlobalCompletedBytes)
+                {
+                    _lastGlobalCompletedBytes = completed;
+                    _lastGlobalProgressAt = DateTimeOffset.UtcNow;
+                }
+            }
+        }
+
+        public bool ShouldPersist(int bytesJustWritten) => _throttle.ShouldPersist(bytesJustWritten);
+
+        public async Task PersistAsync(CancellationToken cancellationToken)
+        {
+            await _store.SaveAsync(_state, CancellationToken.None);
+            _progress?.Report(new DownloadProgressSnapshot(
+                _state.Id, DownloadTaskStatus.Downloading, _state.CompletedBytes, _state.TotalBytes, _state.Segments.Count));
+        }
+
+        public void EnterBackoff()
+        {
+            lock (_lock)
+            {
+                _workersInBackoff++;
+            }
+        }
+
+        public void ExitBackoff()
+        {
+            lock (_lock)
+            {
+                _workersInBackoff--;
+            }
+        }
+
+        /// <summary>
+        /// Called by a worker right after it wakes from a backoff wait. If every worker has been
+        /// in backoff continuously and there has been zero global progress for
+        /// <see cref="StallFailureWindow"/>, the whole task is declared failed.
+        /// </summary>
+        public void CheckForStall()
+        {
+            lock (_lock)
+            {
+                var allStalled = _workersInBackoff >= _totalWorkers;
+                var elapsed = DateTimeOffset.UtcNow - _lastGlobalProgressAt;
+
+                if (allStalled && elapsed >= StallFailureWindow && FailureException is null)
+                {
+                    FailureException = new SegmentedDownloadException(
+                        $"Download stalled: no progress for {elapsed.TotalSeconds:0}s while all connections were rate-limited.");
+                }
+            }
+        }
+
+        public void ReportFailure(Exception ex)
+        {
+            lock (_lock)
+            {
+                FailureException ??= ex;
             }
         }
     }

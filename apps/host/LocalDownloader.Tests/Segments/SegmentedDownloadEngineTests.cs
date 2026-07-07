@@ -172,6 +172,115 @@ public sealed class SegmentedDownloadEngineTests
         Assert.Equal(payload, written);
     }
 
+    [Fact]
+    public async Task DownloadAsync_splits_a_slow_segment_via_work_stealing_and_produces_byte_exact_file()
+    {
+        // 40MB across 4 connections = 10MB per initial segment, well above the 4MB split
+        // threshold. Make the first segment's range artificially slow so the other three
+        // (fast) segments finish first, run out of queued work, and must steal a split of the
+        // slow segment's still-large remaining tail rather than sit idle.
+        var payload = RandomPayload(40 * 1024 * 1024);
+        await using var server = await RangeTestServer.StartAsync(payload, supportsRange: true);
+        server.AddSlowRange(0, payload.Length / 4 - 1);
+        server.SlowRangeDelayPerChunk = TimeSpan.FromMilliseconds(15);
+
+        using var temp = new TempDirectory();
+        using var client = new HttpClient();
+        var engine = new SegmentedDownloadEngine(client);
+        var options = new SegmentedDownloadOptions { OutputDirectory = temp.Path, Connections = 4 };
+        var request = new DownloadRequest
+        {
+            Type = "download.create",
+            Id = "work-stealing-task",
+            Url = server.Url,
+            SuggestedFilename = "work-stealing.bin"
+        };
+
+        var result = await engine.DownloadAsync(request, options, progress: null, CancellationToken.None);
+
+        Assert.Equal(DownloadTaskStatus.Completed, result.Status);
+        Assert.True(result.SegmentCount > 4, $"expected a split to have occurred (segments > 4), got {result.SegmentCount}");
+        Assert.Equal(payload.Length, result.BytesWritten);
+
+        var written = await File.ReadAllBytesAsync(result.FilePath);
+        Assert.Equal(payload, written);
+    }
+
+    [Fact]
+    public async Task DownloadAsync_completes_and_verifies_bytes_when_server_caps_concurrent_connections_with_429()
+    {
+        var payload = RandomPayload(2 * 1024 * 1024 + 123);
+        await using var server = await RangeTestServer.StartAsync(payload, supportsRange: true);
+        server.MaxConcurrentConnections = 4;
+        // Hold every accepted request open briefly so the 8 initial segment requests genuinely
+        // race and overlap against the 4-connection cap, rather than some finishing (and
+        // freeing a slot) before the others have even been dispatched.
+        server.MinRequestDuration = TimeSpan.FromMilliseconds(200);
+
+        using var temp = new TempDirectory();
+        using var client = new HttpClient();
+        var engine = new SegmentedDownloadEngine(client);
+        var options = new SegmentedDownloadOptions { OutputDirectory = temp.Path, Connections = 8 };
+        var request = new DownloadRequest
+        {
+            Type = "download.create",
+            Id = "throttled-task",
+            Url = server.Url,
+            SuggestedFilename = "throttled.bin"
+        };
+
+        var result = await engine.DownloadAsync(request, options, progress: null, CancellationToken.None);
+
+        Assert.Equal(DownloadTaskStatus.Completed, result.Status);
+        Assert.Equal(payload.Length, result.BytesWritten);
+
+        var written = await File.ReadAllBytesAsync(result.FilePath);
+        Assert.Equal(payload, written);
+        Assert.True(server.RejectedCount > 0, "expected at least one request to have been rejected with 429");
+    }
+
+    [Fact]
+    public async Task DownloadAsync_cancel_mid_split_then_resume_produces_byte_exact_file()
+    {
+        var payload = RandomPayload(40 * 1024 * 1024);
+        await using var server = await RangeTestServer.StartAsync(payload, supportsRange: true);
+        server.AddSlowRange(0, payload.Length / 4 - 1);
+        server.SlowRangeDelayPerChunk = TimeSpan.FromMilliseconds(15);
+
+        using var temp = new TempDirectory();
+        using var client = new HttpClient();
+        var engine = new SegmentedDownloadEngine(client);
+        var options = new SegmentedDownloadOptions { OutputDirectory = temp.Path, Connections = 4 };
+        var request = new DownloadRequest
+        {
+            Type = "download.create",
+            Id = "split-then-cancel-task",
+            Url = server.Url,
+            SuggestedFilename = "split-then-cancel.bin"
+        };
+
+        using var pauseCts = new CancellationTokenSource();
+        // Give the initial probe + preallocation time to finish, and the fast segments time to
+        // complete and steal a split of the still-slow segment's tail, before pausing mid-flight.
+        pauseCts.CancelAfter(TimeSpan.FromMilliseconds(800));
+
+        var firstResult = await engine.DownloadAsync(request, options, progress: null, pauseCts.Token);
+        Assert.Equal(DownloadTaskStatus.Paused, firstResult.Status);
+
+        var partPath = $"{Path.Combine(temp.Path, "split-then-cancel.bin")}.part";
+        var metadataPath = $"{Path.Combine(temp.Path, "split-then-cancel.bin")}.task.json";
+        Assert.True(File.Exists(partPath));
+        Assert.True(File.Exists(metadataPath));
+
+        var finalResult = await engine.DownloadAsync(request, options, progress: null, CancellationToken.None);
+
+        Assert.Equal(DownloadTaskStatus.Completed, finalResult.Status);
+        Assert.Equal(payload.Length, finalResult.BytesWritten);
+
+        var written = await File.ReadAllBytesAsync(finalResult.FilePath);
+        Assert.Equal(payload, written);
+    }
+
     private static byte[] RandomPayload(int length)
     {
         var buffer = new byte[length];

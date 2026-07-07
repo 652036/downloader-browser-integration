@@ -10,11 +10,22 @@ namespace LocalDownloader.Core.Segments;
 /// </summary>
 public sealed class SegmentProgress
 {
+    /// <summary>Backing field for <see cref="End"/>, exposed so worker threads can
+    /// <see cref="System.Threading.Volatile"/>-read/write it directly: a work-stealing split
+    /// shrinks a running segment's End concurrently with the writer thread appending bytes, and
+    /// the writer must observe the new boundary without taking a lock on every write.</summary>
+    [JsonIgnore]
+    internal long EndUnsafe;
+
     [JsonPropertyName("start")]
     public long Start { get; set; }
 
     [JsonPropertyName("end")]
-    public long End { get; set; }
+    public long End
+    {
+        get => Volatile.Read(ref EndUnsafe);
+        set => Volatile.Write(ref EndUnsafe, value);
+    }
 
     [JsonPropertyName("completedBytes")]
     public long CompletedBytes { get; set; }
