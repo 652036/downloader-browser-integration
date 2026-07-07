@@ -1,7 +1,10 @@
 using System.IO;
+using System.Net.Http;
+using System.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using LocalDownloader.Core;
+using LocalDownloader.Core.Segments;
 using Microsoft.Win32;
 
 namespace LocalDownloader.App.ViewModels;
@@ -20,6 +23,16 @@ public enum ConfirmDownloadOutcome
 /// </summary>
 public sealed partial class ConfirmDownloadViewModel : ObservableObject
 {
+    /// <summary>Probes a download request for its real size, returning the total byte count or
+    /// null if the probe fails (network error, no Content-Length, etc). Takes the request's
+    /// UA/Referer/Cookie headers into account so the probe reaches the same content a real
+    /// download would. Injectable for unit tests; production code wires this to
+    /// <see cref="DownloadProbe"/> via a real HttpClient (see <see cref="CreateDefaultSizeProbe"/>).</summary>
+    public delegate Task<long?> SizeProbe(DownloadRequest request, CancellationToken cancellationToken);
+
+    private readonly SizeProbe? _sizeProbe;
+    private readonly SynchronizationContext? _syncContext;
+
     public DownloadRequest Request { get; }
 
     public ConfirmDownloadOutcome Outcome { get; private set; } = ConfirmDownloadOutcome.Cancel;
@@ -39,11 +52,20 @@ public sealed partial class ConfirmDownloadViewModel : ObservableObject
     private string _saveDirectory;
 
     public ConfirmDownloadViewModel(DownloadRequest request, string defaultSaveDirectory)
-        : this(request, defaultSaveDirectory, categorizeByType: false)
+        : this(request, defaultSaveDirectory, categorizeByType: false, sizeProbe: null)
     {
     }
 
     public ConfirmDownloadViewModel(DownloadRequest request, string defaultSaveDirectory, bool categorizeByType)
+        : this(request, defaultSaveDirectory, categorizeByType, sizeProbe: null)
+    {
+    }
+
+    public ConfirmDownloadViewModel(
+        DownloadRequest request,
+        string defaultSaveDirectory,
+        bool categorizeByType,
+        SizeProbe? sizeProbe)
     {
         Request = request;
         _fileName = ResolveInitialFileName(request);
@@ -52,6 +74,85 @@ public sealed partial class ConfirmDownloadViewModel : ObservableObject
         _saveDirectory = categorizeByType
             ? Path.Combine(defaultSaveDirectory, FileCategoryClassifier.Classify(_fileName))
             : defaultSaveDirectory;
+
+        _sizeProbe = sizeProbe;
+        _syncContext = SynchronizationContext.Current;
+
+        _ = RefreshSizeFromProbeAsync();
+    }
+
+    private async Task RefreshSizeFromProbeAsync()
+    {
+        if (_sizeProbe is null || string.IsNullOrWhiteSpace(Request.Url))
+        {
+            return;
+        }
+
+        long? probedBytes;
+        try
+        {
+            probedBytes = await _sizeProbe(Request, CancellationToken.None);
+        }
+        catch (Exception)
+        {
+            // Probe failure keeps whatever size was already displayed (design: "探测失败保持原显示").
+            return;
+        }
+
+        if (probedBytes is not > 0)
+        {
+            return;
+        }
+
+        var display = FormatSize(probedBytes);
+        if (_syncContext is not null)
+        {
+            _syncContext.Post(_ => SizeDisplay = display, null);
+        }
+        else
+        {
+            SizeDisplay = display;
+        }
+    }
+
+    /// <summary>Real network-backed probe used by production code (see App.xaml.cs); a fresh
+    /// short-lived HttpClient per call keeps this self-contained and dependency-free for the
+    /// popup's lifetime.</summary>
+    public static SizeProbe CreateDefaultSizeProbe()
+    {
+        return async (request, cancellationToken) =>
+        {
+            if (!Uri.TryCreate(request.Url, UriKind.Absolute, out var uri))
+            {
+                return null;
+            }
+
+            using var httpClient = new HttpClient();
+            var probe = await DownloadProbe.ProbeAsync(
+                httpClient,
+                uri,
+                requestMessage =>
+                {
+                    if (!string.IsNullOrWhiteSpace(request.UserAgent))
+                    {
+                        requestMessage.Headers.UserAgent.TryParseAdd(request.UserAgent);
+                    }
+
+                    if (Uri.TryCreate(request.Referrer, UriKind.Absolute, out var referrer) &&
+                        (referrer.Scheme == Uri.UriSchemeHttp || referrer.Scheme == Uri.UriSchemeHttps))
+                    {
+                        requestMessage.Headers.Referrer = referrer;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(request.CookieHeader))
+                    {
+                        requestMessage.Headers.TryAddWithoutValidation("Cookie", request.CookieHeader);
+                    }
+                },
+                cancellationToken);
+
+            return probe.TotalBytes;
+        };
     }
 
     [RelayCommand]

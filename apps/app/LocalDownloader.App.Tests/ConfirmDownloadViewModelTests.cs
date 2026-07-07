@@ -1,4 +1,5 @@
 using System.IO;
+using System.Net.Http;
 using LocalDownloader.App.ViewModels;
 using LocalDownloader.Core;
 
@@ -101,5 +102,117 @@ public sealed class ConfirmDownloadViewModelTests
         viewModel.CancelCommand.Execute(null);
 
         Assert.Equal(ConfirmDownloadOutcome.Cancel, viewModel.Outcome);
+    }
+
+    [Fact]
+    public async Task Successful_size_probe_updates_size_display_without_touching_file_name()
+    {
+        var request = new DownloadRequest
+        {
+            Url = "https://example.com/a.zip",
+            SuggestedFilename = "a.zip",
+            FileSize = 100
+        };
+
+        var probeStarted = new TaskCompletionSource();
+        var releaseProbe = new TaskCompletionSource();
+        ConfirmDownloadViewModel.SizeProbe probe = async (_, _) =>
+        {
+            probeStarted.TrySetResult();
+            await releaseProbe.Task;
+            return 5 * 1024 * 1024L;
+        };
+
+        var viewModel = new ConfirmDownloadViewModel(request, @"C:\Downloads", categorizeByType: false, probe);
+
+        Assert.Equal(FormatSize(100), viewModel.SizeDisplay);
+
+        await probeStarted.Task;
+        releaseProbe.SetResult();
+
+        await WaitUntilAsync(() => viewModel.SizeDisplay == "5.0 MB");
+
+        Assert.Equal("5.0 MB", viewModel.SizeDisplay);
+        Assert.Equal("a.zip", viewModel.FileName);
+    }
+
+    [Fact]
+    public async Task Failed_size_probe_keeps_original_size_display()
+    {
+        var request = new DownloadRequest
+        {
+            Url = "https://example.com/a.zip",
+            SuggestedFilename = "a.zip",
+            FileSize = 100
+        };
+
+        var probeRan = new TaskCompletionSource();
+        ConfirmDownloadViewModel.SizeProbe probe = (_, _) =>
+        {
+            probeRan.TrySetResult();
+            throw new HttpRequestException("boom");
+        };
+
+        var viewModel = new ConfirmDownloadViewModel(request, @"C:\Downloads", categorizeByType: false, probe);
+
+        await probeRan.Task;
+        // Give the (failed, synchronous-continuation) probe task a moment to fully unwind before
+        // asserting nothing changed.
+        await Task.Delay(50);
+
+        Assert.Equal(FormatSize(100), viewModel.SizeDisplay);
+    }
+
+    [Fact]
+    public async Task Probe_returning_null_keeps_original_size_display()
+    {
+        var request = new DownloadRequest
+        {
+            Url = "https://example.com/a.zip",
+            SuggestedFilename = "a.zip"
+        };
+
+        var probeRan = new TaskCompletionSource();
+        ConfirmDownloadViewModel.SizeProbe probe = (_, _) =>
+        {
+            probeRan.TrySetResult();
+            return Task.FromResult<long?>(null);
+        };
+
+        var viewModel = new ConfirmDownloadViewModel(request, @"C:\Downloads", categorizeByType: false, probe);
+
+        await probeRan.Task;
+        await Task.Delay(50);
+
+        Assert.Equal("大小未知", viewModel.SizeDisplay);
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        // Mirrors ConfirmDownloadViewModel's private FormatSize for test assertions.
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        double size = bytes;
+        var unitIndex = 0;
+        while (size >= 1024 && unitIndex < units.Length - 1)
+        {
+            size /= 1024;
+            unitIndex++;
+        }
+
+        return unitIndex == 0 ? $"{size:0} {units[unitIndex]}" : $"{size:0.0} {units[unitIndex]}";
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, int timeoutMs = 2000)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline)
+            {
+                throw new TimeoutException("Condition was not met within the timeout.");
+            }
+
+            await Task.Delay(10);
+        }
     }
 }

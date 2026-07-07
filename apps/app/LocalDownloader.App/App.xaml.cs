@@ -121,7 +121,11 @@ public partial class App : System.Windows.Application
         }
 
         var settings = SettingsStore.Load();
-        var viewModel = new ConfirmDownloadViewModel(next, settings.DownloadDirectory, settings.CategorizeByType);
+        var viewModel = new ConfirmDownloadViewModel(
+            next,
+            settings.DownloadDirectory,
+            settings.CategorizeByType,
+            ConfirmDownloadViewModel.CreateDefaultSizeProbe());
         var window = new ConfirmDownloadWindow(viewModel);
 
         window.Closed += (_, _) =>
