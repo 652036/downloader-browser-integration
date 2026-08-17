@@ -71,6 +71,7 @@ public static class IpcMessageType
     public const string DownloadReturnToBrowser = "download.returnToBrowser";
     public const string SettingsGet = "settings.get";
     public const string SettingsValue = "settings.value";
+    public const string SettingsChanged = "settings.changed";
 }
 
 /// <summary>

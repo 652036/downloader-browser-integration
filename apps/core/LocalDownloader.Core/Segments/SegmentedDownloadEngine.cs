@@ -62,7 +62,19 @@ public sealed class SegmentedDownloadEngine
 
         var fallbackName = FileNameSanitizer.Sanitize(Path.GetFileName(uri.LocalPath), "download.bin");
         var initialName = FileNameSanitizer.Sanitize(request.SuggestedFilename, fallbackName);
-        var finalPath = GetAvailablePath(Path.Combine(options.OutputDirectory, initialName));
+
+        // Honor a persisted FilePath (Content-Disposition rename, user-chosen name) so resume
+        // loads the existing sidecar instead of recomputing a path from SuggestedFilename.
+        string finalPath;
+        if (!string.IsNullOrWhiteSpace(options.ResumeFilePath))
+        {
+            finalPath = options.ResumeFilePath;
+        }
+        else
+        {
+            finalPath = GetAvailablePath(Path.Combine(options.OutputDirectory, initialName));
+        }
+
         var partPath = $"{finalPath}.part";
         var metadataPath = $"{finalPath}.task.json";
 
@@ -73,6 +85,20 @@ public sealed class SegmentedDownloadEngine
         if (existingState is not null && File.Exists(partPath))
         {
             state = existingState;
+            if (!string.IsNullOrWhiteSpace(state.FilePath))
+            {
+                finalPath = state.FilePath;
+            }
+
+            if (!string.IsNullOrWhiteSpace(state.PartPath))
+            {
+                partPath = state.PartPath;
+            }
+
+            if (!string.IsNullOrWhiteSpace(state.MetadataPath))
+            {
+                metadataPath = state.MetadataPath;
+            }
         }
         else
         {
@@ -85,7 +111,8 @@ public sealed class SegmentedDownloadEngine
                 cancellationToken);
 
             var probedName = FileNameSanitizer.Sanitize(probe.ContentDispositionFilename, initialName);
-            if (!string.Equals(probedName, initialName, StringComparison.Ordinal))
+            if (string.IsNullOrWhiteSpace(options.ResumeFilePath) &&
+                !string.Equals(probedName, initialName, StringComparison.Ordinal))
             {
                 finalPath = GetAvailablePath(Path.Combine(options.OutputDirectory, probedName));
                 partPath = $"{finalPath}.part";
@@ -146,8 +173,19 @@ public sealed class SegmentedDownloadEngine
             throw;
         }
 
-        // All segments complete: verify and finalize.
-        var expectedTotal = state.TotalBytes ?? state.CompletedBytes;
+        // All segments complete: verify and finalize. If any worker saw a different
+        // instance-length than the probe, do not treat the planned size as authoritative.
+        if (state.ObservedInstanceLength is { } observed &&
+            state.TotalBytes is { } planned &&
+            observed != planned)
+        {
+            state.Status = nameof(DownloadTaskStatus.Failed);
+            await _progressStore.SaveAsync(state, CancellationToken.None);
+            throw new SegmentedDownloadException(
+                $"Size mismatch / stale probe: server instance-length is {observed} but probe planned {planned} bytes.");
+        }
+
+        var expectedTotal = state.ObservedInstanceLength ?? state.TotalBytes ?? state.CompletedBytes;
         if (state.CompletedBytes != expectedTotal)
         {
             state.Status = nameof(DownloadTaskStatus.Failed);
@@ -178,7 +216,7 @@ public sealed class SegmentedDownloadEngine
         var uri = new Uri(request.Url!);
         var throttle = new PersistThrottle(options.PersistInterval, options.PersistByteInterval);
         var workerCount = Math.Max(1, Math.Min(options.Connections, state.Segments.Count));
-        var coordinator = new WorkStealingCoordinator(state, progress, throttle, workerCount);
+        var coordinator = new WorkStealingCoordinator(state, progress, throttle, workerCount, options.StallFailureWindow);
 
         // Every worker beyond the number of not-yet-complete segments will simply find the
         // queue empty and immediately attempt a work-steal split, which is the desired behavior
@@ -228,13 +266,14 @@ public sealed class SegmentedDownloadEngine
     }
 
     /// <summary>
-    /// Attempts one segment. Transient (non-rate-limit) failures retry in place a bounded number
-    /// of times with the existing short exponential backoff. Rate-limit responses (403/418/429)
-    /// or refused connections instead put the segment back on the shared queue and send this
-    /// worker into a longer backoff (2s/4s/8s.../30s cap) before it goes looking for new work —
-    /// this both frees the segment up for another (non-throttled) worker immediately and lets
-    /// the throttled worker's own connection slot sit idle, which is the "auto-downgrade
-    /// concurrency" behavior.
+    /// Attempts one segment. Transient (non-rate-limit) failures requeue the segment and retry
+    /// a bounded number of times; the attempt count lives on the segment so it survives requeue.
+    /// Rate-limit responses (418/429) or refused connections put the segment back on the shared
+    /// queue and send this worker into a longer backoff (2s/4s/8s.../30s cap) before it goes
+    /// looking for new work — this both frees the segment up for another (non-throttled) worker
+    /// immediately and lets the throttled worker's own connection slot sit idle, which is the
+    /// "auto-downgrade concurrency" behavior. 403 Forbidden is treated as a hard/auth failure
+    /// (limited retries, then fail the task), not as a rate-limit.
     /// </summary>
     private async Task DownloadSegmentWithRetryAsync(
         Uri uri,
@@ -245,8 +284,6 @@ public sealed class SegmentedDownloadEngine
         WorkStealingCoordinator coordinator,
         CancellationToken cancellationToken)
     {
-        var transientAttempt = 0;
-
         if (segment.IsComplete)
         {
             coordinator.ReleaseSegment(segment);
@@ -269,13 +306,15 @@ public sealed class SegmentedDownloadEngine
                 try
                 {
                     await Task.Delay(delay, cancellationToken);
+                    // Check while this worker still counts as in-backoff; ExitBackoff first
+                    // would make `_workersInBackoff >= _totalWorkers` almost never hold.
+                    coordinator.CheckForStall();
                 }
                 finally
                 {
                     coordinator.ExitBackoff();
                 }
 
-                coordinator.CheckForStall();
                 return;
             }
 
@@ -287,9 +326,16 @@ public sealed class SegmentedDownloadEngine
             coordinator.ReleaseSegment(segment);
             throw;
         }
-        catch (Exception) when (++transientAttempt <= options.MaxRetriesPerSegment)
+        catch (SegmentedDownloadException ex)
         {
-            var delay = TimeSpan.FromMilliseconds(options.RetryBaseDelay.TotalMilliseconds * Math.Pow(2, transientAttempt - 1));
+            // Size mismatch / stale probe / invalid 206 are not transient.
+            coordinator.ReleaseSegment(segment);
+            coordinator.ReportFailure(ex);
+        }
+        catch (Exception) when (segment.RetryCount < options.MaxRetriesPerSegment)
+        {
+            segment.RetryCount++;
+            var delay = TimeSpan.FromMilliseconds(options.RetryBaseDelay.TotalMilliseconds * Math.Pow(2, segment.RetryCount - 1));
             await Task.Delay(delay, cancellationToken);
             coordinator.RequeueSegment(segment);
         }
@@ -329,8 +375,10 @@ public sealed class SegmentedDownloadEngine
 
     private static bool IsRateLimitStatus(HttpStatusCode status)
     {
-        return status is HttpStatusCode.Forbidden // 403
-            or (HttpStatusCode)418
+        // 403 Forbidden is an auth/permission failure, not a rate-limit: callers retry it a
+        // bounded number of times then fail the segment. 418/429 (and connection-refused,
+        // handled separately) trigger worker backoff.
+        return status is (HttpStatusCode)418
             or HttpStatusCode.TooManyRequests; // 429
     }
 
@@ -386,14 +434,23 @@ public sealed class SegmentedDownloadEngine
             return SegmentOutcome.RateLimited;
         }
 
+        long? advertisedBodyLength = null;
+        if (response.StatusCode == HttpStatusCode.PartialContent)
+        {
+            advertisedBodyLength = ValidatePartialContent(response, rangeStart, state);
+        }
+
         await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
         await using var output = new FileStream(state.PartPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
         output.Seek(rangeStart, SeekOrigin.Begin);
 
         var buffer = new byte[81920];
         int bytesRead;
+        long bytesReceived = 0;
         while ((bytesRead = await input.ReadAsync(buffer, cancellationToken)) > 0)
         {
+            bytesReceived += bytesRead;
+
             // Never write past the segment's current End: it may have been shrunk by a
             // work-stealing split that happened concurrently on another worker.
             var currentEnd = Volatile.Read(ref segment.EndUnsafe);
@@ -421,6 +478,12 @@ public sealed class SegmentedDownloadEngine
                 // continues from here.
                 return SegmentOutcome.SplitAway;
             }
+        }
+
+        if (advertisedBodyLength is { } advertised && bytesReceived < advertised)
+        {
+            throw new SegmentedDownloadException(
+                $"206 response body is shorter than Content-Range: advertised {advertised} bytes, received {bytesReceived} bytes.");
         }
 
         return SegmentOutcome.Completed;
@@ -457,6 +520,23 @@ public sealed class SegmentedDownloadEngine
                 using var response = await _httpClient.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 response.EnsureSuccessStatusCode();
 
+                var requestedStart = segment.CompletedBytes;
+                long? advertised206BodyLength = null;
+                if (response.StatusCode == HttpStatusCode.PartialContent)
+                {
+                    advertised206BodyLength = ValidatePartialContent(response, requestedStart, state);
+                }
+                else if (response.StatusCode == HttpStatusCode.OK &&
+                         response.Content.Headers.ContentLength is { } contentLength)
+                {
+                    var impliedTotal = requestedStart == 0 ? contentLength : requestedStart + contentLength;
+                    if (state.TotalBytes is { } probed && impliedTotal != probed)
+                    {
+                        throw new SegmentedDownloadException(
+                            $"Size mismatch / stale probe: GET Content-Length is {contentLength} (implied total {impliedTotal}) but probe planned {probed} bytes.");
+                    }
+                }
+
                 if (state.TotalBytes is null)
                 {
                     state.TotalBytes = response.Content.Headers.ContentLength is { } len && segment.CompletedBytes == 0
@@ -470,8 +550,10 @@ public sealed class SegmentedDownloadEngine
 
                 var buffer = new byte[81920];
                 int bytesRead;
+                long bytesReceived = 0;
                 while ((bytesRead = await input.ReadAsync(buffer, cancellationToken)) > 0)
                 {
+                    bytesReceived += bytesRead;
                     await output.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
                     segment.CompletedBytes += bytesRead;
                     segment.End = segment.Start + segment.CompletedBytes - 1;
@@ -483,11 +565,27 @@ public sealed class SegmentedDownloadEngine
                     }
                 }
 
+                if (advertised206BodyLength is { } advertised && bytesReceived < advertised)
+                {
+                    throw new SegmentedDownloadException(
+                        $"206 response body is shorter than Content-Range: advertised {advertised} bytes, received {bytesReceived} bytes.");
+                }
+
+                if (state.TotalBytes is { } expected && segment.CompletedBytes != expected)
+                {
+                    throw new SegmentedDownloadException(
+                        $"Size mismatch / stale probe: expected {expected} bytes, server sent {segment.CompletedBytes}.");
+                }
+
                 state.TotalBytes ??= segment.CompletedBytes;
                 await _progressStore.SaveAsync(state, CancellationToken.None);
                 return;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (SegmentedDownloadException)
             {
                 throw;
             }
@@ -498,6 +596,73 @@ public sealed class SegmentedDownloadEngine
                 await Task.Delay(delay, cancellationToken);
             }
         }
+    }
+
+    /// <summary>
+    /// Parses a 206 Content-Range, verifies the returned start matches
+    /// <paramref name="requestedStart"/>, records the instance-length, and returns the
+    /// advertised body length (end-start+1) when both ends are present.
+    /// </summary>
+    private static long? ValidatePartialContent(
+        HttpResponseMessage response,
+        long requestedStart,
+        SegmentedTaskState state)
+    {
+        if (!TryGetContentRange(response, out var range) || range is null)
+        {
+            throw new SegmentedDownloadException(
+                "206 Partial Content response missing a valid Content-Range header.");
+        }
+
+        if (range.From is not { } from)
+        {
+            throw new SegmentedDownloadException(
+                $"206 Content-Range is missing a start offset: {range}.");
+        }
+
+        if (from != requestedStart)
+        {
+            throw new SegmentedDownloadException(
+                $"206 Content-Range start mismatch: requested start {requestedStart}, server returned {from}.");
+        }
+
+        if (range.HasLength && range.Length is { } instanceLength)
+        {
+            state.NoteObservedInstanceLength(instanceLength);
+        }
+
+        if (range.To is { } to)
+        {
+            var advertised = to - from + 1;
+            if (advertised <= 0)
+            {
+                throw new SegmentedDownloadException($"Invalid 206 Content-Range: {range}.");
+            }
+
+            return advertised;
+        }
+
+        return null;
+    }
+
+    private static bool TryGetContentRange(HttpResponseMessage response, out ContentRangeHeaderValue? value)
+    {
+        value = response.Content.Headers.ContentRange;
+        if (value is not null)
+        {
+            return true;
+        }
+
+        if (response.Content.Headers.TryGetValues("Content-Range", out var values))
+        {
+            var raw = values.FirstOrDefault();
+            if (raw is not null && ContentRangeHeaderValue.TryParse(raw, out value))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static void ApplyRequestHeaders(HttpRequestMessage requestMessage, DownloadRequest request)
@@ -557,7 +722,7 @@ public sealed class SegmentedDownloadEngine
         throw new IOException("Unable to find an available output file name.");
     }
 
-    private sealed class PersistThrottle
+    internal sealed class PersistThrottle
     {
         private readonly TimeSpan _interval;
         private readonly long _byteInterval;
@@ -595,13 +760,14 @@ public sealed class SegmentedDownloadEngine
     /// worker pool. All mutation of <see cref="SegmentedTaskState.Segments"/> happens under
     /// <see cref="_lock"/>.
     /// </summary>
-    private sealed class WorkStealingCoordinator
+    internal sealed class WorkStealingCoordinator
     {
         private readonly SegmentedTaskState _state;
         private readonly IProgress<DownloadProgressSnapshot>? _progress;
         private readonly PersistThrottle _throttle;
         private readonly SegmentProgressStore _store = new();
         private readonly int _totalWorkers;
+        private readonly TimeSpan _stallFailureWindow;
         private readonly object _lock = new();
         private readonly Queue<SegmentProgress> _queue = new();
         private readonly HashSet<SegmentProgress> _inFlight = new();
@@ -612,16 +778,23 @@ public sealed class SegmentedDownloadEngine
 
         public Exception? FailureException { get; private set; }
 
-        public WorkStealingCoordinator(
+        internal WorkStealingCoordinator(SegmentedTaskState state, int totalWorkers)
+            : this(state, progress: null, new PersistThrottle(TimeSpan.FromHours(1), long.MaxValue), totalWorkers, StallFailureWindow)
+        {
+        }
+
+        internal WorkStealingCoordinator(
             SegmentedTaskState state,
             IProgress<DownloadProgressSnapshot>? progress,
             PersistThrottle throttle,
-            int totalWorkers)
+            int totalWorkers,
+            TimeSpan stallFailureWindow)
         {
             _state = state;
             _progress = progress;
             _throttle = throttle;
             _totalWorkers = Math.Max(1, totalWorkers);
+            _stallFailureWindow = stallFailureWindow > TimeSpan.Zero ? stallFailureWindow : StallFailureWindow;
             _lastGlobalCompletedBytes = state.CompletedBytes;
 
             foreach (var segment in state.Segments.Where(s => !s.IsComplete))
@@ -707,14 +880,34 @@ public sealed class SegmentedDownloadEngine
             }
         }
 
-        /// <summary>Puts a segment back on the shared queue (still in-flight, since it still has
-        /// unfinished bytes) so any idle worker — including this one, on its next loop
-        /// iteration — can pick it up again.</summary>
+        /// <summary>Puts a segment back on the shared queue after releasing it from the
+        /// in-flight set. Leaving it in-flight would let another idle worker steal/split the
+        /// same range and double-write it.</summary>
         public void RequeueSegment(SegmentProgress segment)
         {
             lock (_lock)
             {
+                _inFlight.Remove(segment);
                 _queue.Enqueue(segment);
+            }
+        }
+
+        internal bool IsInFlight(SegmentProgress segment)
+        {
+            lock (_lock)
+            {
+                return _inFlight.Contains(segment);
+            }
+        }
+
+        internal int QueuedCount
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    return _queue.Count;
+                }
             }
         }
 
@@ -780,7 +973,7 @@ public sealed class SegmentedDownloadEngine
                 var allStalled = _workersInBackoff >= _totalWorkers;
                 var elapsed = DateTimeOffset.UtcNow - _lastGlobalProgressAt;
 
-                if (allStalled && elapsed >= StallFailureWindow && FailureException is null)
+                if (allStalled && elapsed >= _stallFailureWindow && FailureException is null)
                 {
                     FailureException = new SegmentedDownloadException(
                         $"Download stalled: no progress for {elapsed.TotalSeconds:0}s while all connections were rate-limited.");

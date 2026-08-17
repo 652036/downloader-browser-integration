@@ -30,6 +30,11 @@ public sealed class SegmentProgress
     [JsonPropertyName("completedBytes")]
     public long CompletedBytes { get; set; }
 
+    /// <summary>Transient (non-rate-limit) retry attempts consumed by this segment. Lives on
+    /// the segment so it survives requeue; a local counter would reset and retry forever.</summary>
+    [JsonPropertyName("retryCount")]
+    public int RetryCount { get; set; }
+
     [JsonIgnore]
     public bool IsComplete => CompletedBytes >= (End - Start + 1);
 }
@@ -60,6 +65,39 @@ public sealed class SegmentedTaskState
 
     [JsonPropertyName("totalBytes")]
     public long? TotalBytes { get; set; }
+
+    /// <summary>
+    /// Instance-length observed from a 206 Content-Range during this process lifetime.
+    /// Not persisted. Used to reject a stale probe size before finalize.
+    /// </summary>
+    [JsonIgnore]
+    internal long? ObservedInstanceLength { get; set; }
+
+    private readonly object _observedLock = new();
+
+    /// <summary>
+    /// Records a 206 instance-length. Throws <see cref="SegmentedDownloadException"/> if it
+    /// conflicts with a previously observed value or with the probed <see cref="TotalBytes"/>.
+    /// </summary>
+    internal void NoteObservedInstanceLength(long instanceLength)
+    {
+        lock (_observedLock)
+        {
+            if (ObservedInstanceLength is { } existing && existing != instanceLength)
+            {
+                throw new SegmentedDownloadException(
+                    $"Size mismatch / stale probe: server advertised conflicting instance-lengths {existing} and {instanceLength}.");
+            }
+
+            ObservedInstanceLength = instanceLength;
+
+            if (TotalBytes is { } planned && instanceLength != planned)
+            {
+                throw new SegmentedDownloadException(
+                    $"Size mismatch / stale probe: server instance-length is {instanceLength} but probe planned {planned} bytes.");
+            }
+        }
+    }
 
     [JsonPropertyName("supportsRange")]
     public bool SupportsRange { get; set; }

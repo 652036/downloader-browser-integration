@@ -37,8 +37,7 @@ public static class FileNameSanitizer
             fileName = fallbackName;
         }
 
-        var invalidChars = Path.GetInvalidFileNameChars();
-        var sanitized = new string(fileName.Select(ch => invalidChars.Contains(ch) ? '_' : ch).ToArray());
+        var sanitized = new string(fileName.Select(ch => IsInvalidFileNameChar(ch) ? '_' : ch).ToArray());
         sanitized = sanitized.Trim().TrimEnd('.');
 
         if (string.IsNullOrWhiteSpace(sanitized) || IsReservedDeviceName(sanitized))
@@ -47,6 +46,18 @@ public static class FileNameSanitizer
         }
 
         return sanitized;
+    }
+
+    private static bool IsInvalidFileNameChar(char ch)
+    {
+        // Always apply the Windows set: this product writes Windows paths, and
+        // Path.GetInvalidFileNameChars() is OS-specific (Linux allows '<' etc.).
+        if (ch is '<' or '>' or ':' or '"' or '/' or '\\' or '|' or '?' or '*')
+        {
+            return true;
+        }
+
+        return ch < 32 || Path.GetInvalidFileNameChars().Contains(ch);
     }
 
     private static bool IsReservedDeviceName(string fileName)

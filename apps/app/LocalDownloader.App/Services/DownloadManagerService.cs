@@ -21,6 +21,7 @@ public sealed class DownloadManagerService
     private readonly SettingsStore _settingsStore;
     private readonly TaskRegistryStore _taskRegistryStore;
     private readonly ConcurrentDictionary<string, ManagedDownloadTask> _tasks = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource> _inFlightRuns = new();
     private readonly object _queueLock = new();
     private readonly Queue<string> _pendingQueue = new();
     private int _runningCount;
@@ -120,9 +121,10 @@ public sealed class DownloadManagerService
     {
         if (_tasks.TryRemove(id, out var task))
         {
-            if (deleteFile && task.FilePath is not null && File.Exists(task.FilePath))
+            TryDeleteSidecars(task);
+            if (deleteFile)
             {
-                File.Delete(task.FilePath);
+                TryDeleteFile(task.FilePath);
             }
 
             PersistAll();
@@ -131,13 +133,43 @@ public sealed class DownloadManagerService
 
     public void PauseAll()
     {
+        // Queued tasks have no RunCts; they must leave the FIFO and become Paused so
+        // TryStartNext cannot start them after a PauseAll / ExitApplication.
+        lock (_queueLock)
+        {
+            _pendingQueue.Clear();
+        }
+
         foreach (var task in _tasks.Values)
         {
             if (task.Status is DownloadTaskStatus.Downloading or DownloadTaskStatus.Probing or DownloadTaskStatus.Queued)
             {
+                if (task.Status is DownloadTaskStatus.Queued)
+                {
+                    task.Status = DownloadTaskStatus.Paused;
+                    task.UpdatedAt = DateTimeOffset.UtcNow;
+                    TaskChanged?.Invoke(task);
+                }
+
                 task.RunCts?.Cancel();
             }
         }
+
+        PersistAll();
+    }
+
+    /// <summary>Blocks until in-flight <see cref="RunTaskAsync"/> calls finish persisting
+    /// (or <paramref name="timeout"/> elapses). Used by ExitApplication so teardown does not
+    /// race sidecar / tasks.json writes.</summary>
+    public bool WaitForIdle(TimeSpan timeout)
+    {
+        var pending = _inFlightRuns.Values.Select(tcs => tcs.Task).ToArray();
+        if (pending.Length == 0)
+        {
+            return true;
+        }
+
+        return Task.WhenAll(pending).Wait(timeout);
     }
 
     public void ResumeAll()
@@ -195,16 +227,30 @@ public sealed class DownloadManagerService
 
     private async Task RunTaskAsync(ManagedDownloadTask task, AppSettings settings)
     {
-        task.RunCts = new CancellationTokenSource();
-        task.Status = DownloadTaskStatus.Probing;
-        task.UpdatedAt = DateTimeOffset.UtcNow;
-        TaskChanged?.Invoke(task);
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _inFlightRuns[task.Id] = completion;
 
-        var options = new SegmentedDownloadOptions
+        task.RunCts = new CancellationTokenSource();
+
+        try
         {
-            OutputDirectory = string.IsNullOrWhiteSpace(task.OutputDirectory) ? settings.DownloadDirectory : task.OutputDirectory,
-            Connections = settings.ConnectionsPerTask
-        };
+            if (task.Status is DownloadTaskStatus.Paused or DownloadTaskStatus.Canceled ||
+                task.IsCanceledByUser ||
+                task.RunCts.IsCancellationRequested)
+            {
+                return;
+            }
+
+            task.Status = DownloadTaskStatus.Probing;
+            task.UpdatedAt = DateTimeOffset.UtcNow;
+            TaskChanged?.Invoke(task);
+
+            var options = new SegmentedDownloadOptions
+            {
+                OutputDirectory = string.IsNullOrWhiteSpace(task.OutputDirectory) ? settings.DownloadDirectory : task.OutputDirectory,
+                Connections = settings.ConnectionsPerTask,
+                ResumeFilePath = task.FilePath
+            };
 
         var progress = new Progress<DownloadProgressSnapshot>(snapshot =>
         {
@@ -216,23 +262,24 @@ public sealed class DownloadManagerService
             TaskChanged?.Invoke(task);
         });
 
-        try
-        {
-            var result = await _engine.DownloadAsync(task.Request, options, progress, task.RunCts.Token);
-            task.Status = result.Status;
-            task.FilePath = result.FilePath;
-            task.BytesDownloaded = result.BytesWritten;
-            task.SegmentCount = result.SegmentCount;
-        }
-        catch (Exception ex)
-        {
-            task.Status = task.IsCanceledByUser ? DownloadTaskStatus.Canceled : DownloadTaskStatus.Failed;
-            task.ErrorMessage = ex.Message;
+            try
+            {
+                var result = await _engine.DownloadAsync(task.Request, options, progress, task.RunCts.Token);
+                task.Status = result.Status;
+                task.FilePath = result.FilePath;
+                task.BytesDownloaded = result.BytesWritten;
+                task.SegmentCount = result.SegmentCount;
+            }
+            catch (Exception ex)
+            {
+                task.Status = task.IsCanceledByUser ? DownloadTaskStatus.Canceled : DownloadTaskStatus.Failed;
+                task.ErrorMessage = ex.Message;
+            }
         }
         finally
         {
             task.UpdatedAt = DateTimeOffset.UtcNow;
-            task.RunCts.Dispose();
+            task.RunCts?.Dispose();
             task.RunCts = null;
 
             lock (_queueLock)
@@ -242,7 +289,39 @@ public sealed class DownloadManagerService
 
             PersistAll();
             TaskChanged?.Invoke(task);
+            completion.TrySetResult();
+            _inFlightRuns.TryRemove(task.Id, out _);
             TryStartNext();
+        }
+    }
+
+    private static void TryDeleteSidecars(ManagedDownloadTask task)
+    {
+        if (string.IsNullOrWhiteSpace(task.FilePath))
+        {
+            return;
+        }
+
+        TryDeleteFile($"{task.FilePath}.part");
+        TryDeleteFile($"{task.FilePath}.task.json");
+    }
+
+    private static void TryDeleteFile(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return;
+        }
+
+        try
+        {
+            File.Delete(path);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
         }
     }
 

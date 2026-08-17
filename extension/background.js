@@ -1,6 +1,6 @@
 const NATIVE_HOST = "com.local.fastdownloader";
 const CONTEXT_MENU_ID = "download-with-local-downloader";
-const RESPONSE_TIMEOUT_MS = 3000;
+const RESPONSE_TIMEOUT_MS = 10000;
 const BYPASS_TTL_MS = 10 * 60 * 1000;
 
 // Built-in default intercept lists. The App holds the authoritative copy; these are the
@@ -75,6 +75,23 @@ function onNativeMessage(message) {
   if (message.type === "download.returnToBrowser") {
     handleReturnToBrowser(message);
     return;
+  }
+
+  if (message.type === "settings.changed" || message.type === "settings.value") {
+    applyInterceptConfig(message.interceptExtensions, message.interceptMimePrefixes);
+    try {
+      chrome.storage.local.set({
+        interceptExtensions: message.interceptExtensions,
+        interceptMimePrefixes: message.interceptMimePrefixes,
+      });
+    } catch (_error) {
+      // Cache write is best-effort.
+    }
+
+    if (message.type === "settings.changed") {
+      return;
+    }
+    // settings.value may also complete a pending settings.get below.
   }
 
   const pending = message.id ? pendingRequests.get(message.id) : null;
@@ -168,10 +185,54 @@ async function syncInterceptSettings() {
 // --- Bypass list (URLs handed back to the browser) -------------------------------------------
 
 const bypassUrls = new Map(); // url -> expiry timestamp (ms)
+const BYPASS_STORAGE_KEY = "bypassUrls";
+
+function persistBypassMap() {
+  try {
+    if (!chrome.storage || !chrome.storage.session) {
+      return;
+    }
+
+    const stored = {};
+    for (const [url, expiry] of bypassUrls.entries()) {
+      stored[url] = expiry;
+    }
+
+    chrome.storage.session.set({ [BYPASS_STORAGE_KEY]: stored });
+  } catch (_error) {
+    // In-memory map remains the fallback (tests / missing session storage).
+  }
+}
+
+function loadBypassMap() {
+  try {
+    if (!chrome.storage || !chrome.storage.session) {
+      return;
+    }
+
+    chrome.storage.session.get([BYPASS_STORAGE_KEY], (stored) => {
+      if (chrome.runtime.lastError || !stored || !stored[BYPASS_STORAGE_KEY]) {
+        return;
+      }
+
+      const now = Date.now();
+      const entries = stored[BYPASS_STORAGE_KEY];
+      for (const url of Object.keys(entries)) {
+        const expiry = Number(entries[url]);
+        if (Number.isFinite(expiry) && expiry > now) {
+          bypassUrls.set(url, expiry);
+        }
+      }
+    });
+  } catch (_error) {
+    // Defaults stay in-memory only.
+  }
+}
 
 function addBypass(url) {
   if (url) {
     bypassUrls.set(url, Date.now() + BYPASS_TTL_MS);
+    persistBypassMap();
   }
 }
 
@@ -183,6 +244,7 @@ function isBypassed(url) {
 
   if (Date.now() > expiry) {
     bypassUrls.delete(url);
+    persistBypassMap();
     return false;
   }
 
@@ -225,24 +287,38 @@ chrome.downloads.onCreated.addListener((_downloadItem) => {
   // final filename and MIME type are known.
 });
 
-chrome.downloads.onDeterminingFilename.addListener((downloadItem, _suggest) => {
-  maybeInterceptDownload(downloadItem);
+chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+  maybeInterceptDownload(downloadItem, suggest);
 });
 
-function maybeInterceptDownload(downloadItem) {
+function callSuggest(suggest) {
+  if (typeof suggest === "function") {
+    try {
+      suggest();
+    } catch (_error) {
+      // Chrome may throw if the download was already canceled; never leave the listener hanging.
+    }
+  }
+}
+
+function maybeInterceptDownload(downloadItem, suggest) {
   const url = downloadItem.finalUrl || downloadItem.url;
 
   if (isBypassed(url) || isBypassed(downloadItem.url)) {
+    callSuggest(suggest);
     return;
   }
 
   if (!shouldInterceptDownload(downloadItem)) {
+    callSuggest(suggest);
     return;
   }
 
   // Cancel first so the browser never writes the file; any handoff failure below re-triggers
-  // a browser download through the bypass list (fail-open).
+  // a browser download through the bypass list (fail-open). Always call suggest() so Chrome
+  // does not hang in onDeterminingFilename.
   chrome.downloads.cancel(downloadItem.id, () => void chrome.runtime.lastError);
+  callSuggest(suggest);
 
   handOffDownload(downloadItem).catch((error) => {
     console.warn("Local Downloader handoff failed; failing open to browser download:", error);
@@ -376,6 +452,7 @@ if (chrome.runtime.onStartup) {
 }
 
 loadCachedInterceptConfig();
+loadBypassMap();
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId !== CONTEXT_MENU_ID) {

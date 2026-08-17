@@ -37,6 +37,16 @@ public sealed partial class ConfirmDownloadViewModel : ObservableObject
 
     public ConfirmDownloadOutcome Outcome { get; private set; } = ConfirmDownloadOutcome.Cancel;
 
+    /// <summary>Clipboard (and other non-browser) sources never canceled a Chrome download, so
+    /// "return to browser" is not offered.</summary>
+    public bool ShowReturnToBrowser =>
+        !string.Equals(Request.Source, "clipboard", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A canceled browser-intercepted download must fail-open back to Chrome; the
+    /// extension already canceled the original item when it handed off.</summary>
+    public bool ShouldFailOpenOnCancel =>
+        string.Equals(Request.Source, "browser-download", StringComparison.OrdinalIgnoreCase);
+
     public event Action? RequestClose;
 
     [ObservableProperty]

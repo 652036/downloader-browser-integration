@@ -36,6 +36,31 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
+    public void Save_preserves_existing_mime_prefixes_instead_of_resetting_defaults()
+    {
+        using var temp = new TempDirectory();
+        var store = new SettingsStore(Path.Combine(temp.Path, "settings.json"));
+        var existing = store.Load();
+        existing.InterceptMimePrefixes = new List<string> { "application/x-custom", "video/" };
+        store.Save(existing);
+
+        var viewModel = new SettingsViewModel(store)
+        {
+            DownloadDirectory = temp.Path,
+            InterceptExtensionsText = ".zip"
+        };
+
+        AppSettings? broadcast = null;
+        viewModel.SettingsSaved += settings => broadcast = settings;
+        viewModel.SaveCommand.Execute(null);
+
+        var saved = store.Load();
+        Assert.Equal(new[] { "application/x-custom", "video/" }, saved.InterceptMimePrefixes);
+        Assert.NotNull(broadcast);
+        Assert.Equal(saved.InterceptMimePrefixes, broadcast!.InterceptMimePrefixes);
+    }
+
+    [Fact]
     public void Cancel_raises_RequestClose_without_saving()
     {
         using var temp = new TempDirectory();

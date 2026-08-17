@@ -7,6 +7,8 @@ namespace LocalDownloader.Host;
 /// Connects to the LocalDownloader.App named pipe, launching the App executable (from the
 /// same directory as the Host) if the pipe is not already listening. Retries every 500ms up
 /// to a 5 second total timeout, matching the design doc's App-not-running recovery path.
+/// Callers should invoke <see cref="ConnectAsync"/> before reading the first native-messaging
+/// frame so App launch overlaps the extension's (longer) response wait.
 /// </summary>
 public sealed class AppPipeConnector
 {

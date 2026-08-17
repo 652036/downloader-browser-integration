@@ -94,6 +94,26 @@ public sealed class ConfirmDownloadViewModelTests
     }
 
     [Fact]
+    public void Clipboard_source_hides_return_to_browser_and_does_not_fail_open_on_cancel()
+    {
+        var request = new DownloadRequest { Url = "https://example.com/a.zip", Source = "clipboard" };
+        var viewModel = new ConfirmDownloadViewModel(request, @"C:\Downloads");
+
+        Assert.False(viewModel.ShowReturnToBrowser);
+        Assert.False(viewModel.ShouldFailOpenOnCancel);
+    }
+
+    [Fact]
+    public void Browser_source_offers_return_to_browser_and_fail_opens_on_cancel()
+    {
+        var request = new DownloadRequest { Url = "https://example.com/a.zip", Source = "browser-download" };
+        var viewModel = new ConfirmDownloadViewModel(request, @"C:\Downloads");
+
+        Assert.True(viewModel.ShowReturnToBrowser);
+        Assert.True(viewModel.ShouldFailOpenOnCancel);
+    }
+
+    [Fact]
     public void CancelCommand_sets_outcome_and_raises_close()
     {
         var request = new DownloadRequest { Url = "https://example.com/a.zip" };

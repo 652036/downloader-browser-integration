@@ -17,6 +17,7 @@ function createChromeMock(options = {}) {
   };
 
   const ports = [];
+  const sessionData = { ...(options.sessionStore || {}) };
 
   function createPort(host) {
     const port = {
@@ -104,6 +105,23 @@ function createChromeMock(options = {}) {
         get: (keys, callback) => callback(options.storedConfig || {}),
         set: (value) => {
           listeners.storageSet = value;
+        },
+      },
+      session: {
+        data: sessionData,
+        get: (keys, callback) => {
+          const result = {};
+          const list = Array.isArray(keys) ? keys : [keys];
+          for (const key of list) {
+            if (key in sessionData) {
+              result[key] = sessionData[key];
+            }
+          }
+          callback(result);
+        },
+        set: (value) => {
+          Object.assign(sessionData, value);
+          listeners.sessionSet = value;
         },
       },
     },
@@ -418,6 +436,100 @@ async function testContextMenuFailsOpenWhenHostUnavailable() {
   assert.strictEqual(chromeMock.listeners.browserDownloads[0].url, "https://example.test/files/report.zip");
 }
 
+async function testSuggestIsCalledOnInterceptAndBypass() {
+  const chromeMock = createChromeMock();
+  loadBackground(chromeMock);
+
+  const suggested = [];
+  chromeMock.listeners.determiningFilename[0](zipDownloadItem({ id: 110 }), () => suggested.push("intercept"));
+  await flush();
+  assert.deepStrictEqual(suggested, ["intercept"]);
+  assert.deepStrictEqual(chromeMock.listeners.cancelled, [110]);
+
+  chromeMock.ports[0].emitMessage({
+    type: "download.returnToBrowser",
+    url: "https://example.test/downloads/archive.zip",
+    suggestedFilename: "archive.zip",
+  });
+  await flush();
+
+  chromeMock.listeners.determiningFilename[0](zipDownloadItem({ id: 111 }), () => suggested.push("bypass"));
+  await flush();
+  assert.deepStrictEqual(suggested, ["intercept", "bypass"]);
+  assert.ok(!chromeMock.listeners.cancelled.includes(111));
+}
+
+async function testFailOpenPersistsBypassInSessionStorage() {
+  const chromeMock = createChromeMock({ postMessageThrows: true });
+  loadBackground(chromeMock);
+
+  const suggested = [];
+  chromeMock.listeners.determiningFilename[0](zipDownloadItem({ id: 120 }), () => suggested.push("fail-open"));
+  await flush();
+
+  assert.deepStrictEqual(suggested, ["fail-open"]);
+  assert.ok(chromeMock.listeners.sessionSet);
+  assert.ok(chromeMock.listeners.sessionSet.bypassUrls["https://example.test/downloads/archive.zip"]);
+
+  // A fresh service worker that only has session storage should honor the bypass.
+  const reloaded = createChromeMock({
+    sessionStore: chromeMock.storage.session.data,
+  });
+  loadBackground(reloaded);
+  await flush();
+
+  reloaded.listeners.determiningFilename[0](zipDownloadItem({ id: 121 }), () => {});
+  await flush();
+  assert.deepStrictEqual(reloaded.listeners.cancelled, []);
+}
+
+async function testSettingsChangedPushUpdatesInterceptCache() {
+  const chromeMock = createChromeMock();
+  loadBackground(chromeMock);
+
+  // Open a port by intercepting a first download.
+  chromeMock.listeners.determiningFilename[0](zipDownloadItem(), () => {});
+  await flush();
+  assert.strictEqual(chromeMock.ports.length, 1);
+
+  chromeMock.ports[0].emitMessage({
+    type: "settings.changed",
+    interceptExtensions: [".customext"],
+    interceptMimePrefixes: ["application/x-custom"],
+  });
+  await flush();
+
+  assert.ok(chromeMock.listeners.storageSet);
+  assert.deepStrictEqual(chromeMock.listeners.storageSet.interceptExtensions, [".customext"]);
+
+  chromeMock.listeners.determiningFilename[0](
+    zipDownloadItem({
+      id: 130,
+      url: "https://example.test/files/data.customext",
+      finalUrl: "https://example.test/files/data.customext",
+      filename: "data.customext",
+      mime: "application/x-unknown",
+    }),
+    () => {},
+  );
+  await flush();
+  assert.ok(chromeMock.listeners.cancelled.includes(130));
+
+  chromeMock.listeners.determiningFilename[0](zipDownloadItem({ id: 131 }), () => {});
+  await flush();
+  assert.ok(!chromeMock.listeners.cancelled.includes(131));
+}
+
+function testResponseTimeoutAllowsColdStart() {
+  const code = fs.readFileSync(path.join(__dirname, "background.js"), "utf8");
+  const match = code.match(/RESPONSE_TIMEOUT_MS\s*=\s*(\d+)/);
+  assert.ok(match, "RESPONSE_TIMEOUT_MS should be declared");
+  assert.ok(
+    Number(match[1]) >= 10000,
+    `RESPONSE_TIMEOUT_MS must be at least 10000ms to cover Host's 5s App launch, got ${match[1]}`,
+  );
+}
+
 function testManifestDeclaresRequiredPermissions() {
   const manifestPath = path.join(__dirname, "manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
@@ -444,6 +556,10 @@ function testManifestDeclaresRequiredPermissions() {
   await testCachedConfigLoadedFromStorage();
   await testContextMenuSendsDownloadCreateOverPort();
   await testContextMenuFailsOpenWhenHostUnavailable();
+  await testSuggestIsCalledOnInterceptAndBypass();
+  await testFailOpenPersistsBypassInSessionStorage();
+  await testSettingsChangedPushUpdatesInterceptCache();
+  testResponseTimeoutAllowsColdStart();
   testManifestDeclaresRequiredPermissions();
   console.log("extension tests ok");
 })().catch((error) => {

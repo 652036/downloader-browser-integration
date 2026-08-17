@@ -11,13 +11,17 @@ namespace LocalDownloader.App.ViewModels;
 /// Backs the settings window: save directory, per-task connection count (1-32), concurrent
 /// task count, the editable intercept extension list (one per line, textbox-friendly), and
 /// launch-at-startup. Saved settings take effect immediately for new tasks and are picked up
-/// by the extension on its next settings.get call.
+/// by the extension immediately via a settings.changed broadcast (and on the next settings.get).
 /// </summary>
 public sealed partial class SettingsViewModel : ObservableObject
 {
     private readonly SettingsStore _settingsStore;
 
     public event Action? RequestClose;
+
+    /// <summary>Raised after a successful Save with the persisted settings so the App can
+    /// push intercept lists to the extension immediately (not only on the next settings.get).</summary>
+    public event Action<AppSettings>? SettingsSaved;
 
     [ObservableProperty]
     private string _downloadDirectory;
@@ -71,6 +75,13 @@ public sealed partial class SettingsViewModel : ObservableObject
     [RelayCommand]
     private void Save()
     {
+        // The settings UI does not edit MIME prefixes; preserve whatever is already stored
+        // instead of clobbering a customized list with the built-in defaults.
+        var existing = _settingsStore.Load();
+        var mimePrefixes = existing.InterceptMimePrefixes is { Count: > 0 }
+            ? existing.InterceptMimePrefixes
+            : AppSettings.DefaultInterceptMimePrefixes();
+
         var settings = new AppSettings
         {
             DownloadDirectory = string.IsNullOrWhiteSpace(DownloadDirectory)
@@ -79,7 +90,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             ConnectionsPerTask = Math.Clamp(ConnectionsPerTask, 1, 32),
             MaxConcurrentTasks = Math.Max(1, MaxConcurrentTasks),
             InterceptExtensions = ParseExtensions(InterceptExtensionsText),
-            InterceptMimePrefixes = AppSettings.DefaultInterceptMimePrefixes(),
+            InterceptMimePrefixes = mimePrefixes,
             LaunchAtStartup = LaunchAtStartup,
             CategorizeByType = CategorizeByType,
             WatchClipboard = WatchClipboard
@@ -87,6 +98,7 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         _settingsStore.Save(settings);
         StartupRegistration.SetEnabled(LaunchAtStartup);
+        SettingsSaved?.Invoke(settings);
 
         RequestClose?.Invoke();
     }

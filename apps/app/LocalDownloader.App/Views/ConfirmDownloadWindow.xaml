@@ -11,6 +11,9 @@
         Foreground="{DynamicResource TextPrimaryBrush}"
         FontFamily="{StaticResource AppFontFamily}"
         WindowStyle="None">
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis" />
+    </Window.Resources>
     <WindowChrome.WindowChrome>
         <WindowChrome CaptionHeight="40"
                       GlassFrameThickness="0"
@@ -81,7 +84,8 @@
                     Command="{Binding BrowseSaveDirectoryCommand}" />
 
             <StackPanel Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Right">
-                <Button Content="交回浏览器" Margin="0,0,8,0" Command="{Binding ReturnToBrowserCommand}" />
+                <Button Content="交回浏览器" Margin="0,0,8,0" Command="{Binding ReturnToBrowserCommand}"
+                        Visibility="{Binding ShowReturnToBrowser, Converter={StaticResource BoolToVis}}" />
                 <Button Content="取消" Margin="0,0,8,0" Command="{Binding CancelCommand}" />
                 <Button Content="开始下载" Style="{StaticResource AccentButton}" IsDefault="True"
                         Command="{Binding StartCommand}" />

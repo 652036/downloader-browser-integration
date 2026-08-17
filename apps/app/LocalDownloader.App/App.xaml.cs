@@ -145,6 +145,14 @@ public partial class App : System.Windows.Application
 
                 case ConfirmDownloadOutcome.Cancel:
                 default:
+                    // Browser-origin downloads were already canceled in Chrome when intercepted.
+                    // download.accepted was sent before this dialog, so cancel must fail-open
+                    // (returnToBrowser) or the browser is left with no download at all.
+                    if (viewModel.ShouldFailOpenOnCancel)
+                    {
+                        _ = SendReturnToBrowserAsync(viewModel.Request);
+                    }
+
                     // A canceled clipboard-detected URL must not be offered again (design:
                     // "弹窗被取消的 URL 不再重复弹"); browser-sourced cancellations are harmless
                     // no-ops here since they never populate the dedupe tracker in the first place.
@@ -185,6 +193,23 @@ public partial class App : System.Windows.Application
         await _pipeServer.BroadcastAsync(message, CancellationToken.None);
     }
 
+    private async Task BroadcastSettingsAsync(AppSettings settings)
+    {
+        if (_pipeServer is null)
+        {
+            return;
+        }
+
+        var message = JsonSerializer.Serialize(new
+        {
+            type = IpcMessageType.SettingsChanged,
+            interceptExtensions = settings.InterceptExtensions,
+            interceptMimePrefixes = settings.InterceptMimePrefixes
+        });
+
+        await _pipeServer.BroadcastAsync(message, CancellationToken.None);
+    }
+
     public void ShowMainWindow()
     {
         if (_mainWindow is null)
@@ -210,6 +235,7 @@ public partial class App : System.Windows.Application
         }
 
         var viewModel = new SettingsViewModel(SettingsStore);
+        viewModel.SettingsSaved += settings => _ = BroadcastSettingsAsync(settings);
         _settingsWindow = new SettingsWindow(viewModel);
         _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         _settingsWindow.Show();
@@ -219,8 +245,9 @@ public partial class App : System.Windows.Application
     {
         IsExiting = true;
 
-        // Pause outstanding work and flush state before tearing down (design: "退出时未完成任务先暂停落盘").
+        // Pause outstanding work and wait for persist before tearing down (design: "退出时未完成任务先暂停落盘").
         DownloadManager?.PauseAll();
+        DownloadManager?.WaitForIdle(TimeSpan.FromSeconds(8));
 
         _clipboardWatcher?.Dispose();
         _trayIcon?.Dispose();

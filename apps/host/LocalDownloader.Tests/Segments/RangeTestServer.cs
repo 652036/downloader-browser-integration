@@ -31,6 +31,26 @@ public sealed class RangeTestServer : IAsyncDisposable
     /// beyond the cap receive HTTP 429 immediately instead of being served.</summary>
     public int MaxConcurrentConnections { get; set; }
 
+    /// <summary>When set, a Range: bytes=0-0 probe advertises this instance-length
+    /// instead of <see cref="Payload"/> length (simulates a stale CDN HEAD/probe size).</summary>
+    public long? ProbeInstanceLength { get; set; }
+
+    /// <summary>When set, non-probe 206 responses advertise this instance-length
+    /// instead of <see cref="Payload"/> length.</summary>
+    public long? GetInstanceLength { get; set; }
+
+    /// <summary>When set, non-probe 206 responses send only this many body bytes
+    /// (clean close, no abort) while still advertising the full Content-Range.</summary>
+    public long? TruncateRangeBodyBytes { get; set; }
+
+    /// <summary>When set, every request after <see cref="AllowSuccessfulRequests"/> is answered
+    /// with this status code and an empty body (used to exercise 403/429 handling).</summary>
+    public int? ForcedStatusCode { get; set; }
+
+    /// <summary>Number of requests (including the probe) allowed to succeed before
+    /// <see cref="ForcedStatusCode"/> kicks in.</summary>
+    public int AllowSuccessfulRequests { get; set; }
+
     /// <summary>When set, every accepted request holds its connection slot open for at least
     /// this long before completing, widening the window during which concurrent requests
     /// actually overlap (useful for deterministically exercising <see cref="MaxConcurrentConnections"/>
@@ -77,7 +97,16 @@ public sealed class RangeTestServer : IAsyncDisposable
 
         app.MapGet("/file.bin", async context =>
         {
-            if (server!.MaxConcurrentConnections > 0 &&
+            server!.RequestCount++;
+
+            if (server.ForcedStatusCode is int forced && server.RequestCount > server.AllowSuccessfulRequests)
+            {
+                context.Response.StatusCode = forced;
+                await context.Response.CompleteAsync();
+                return;
+            }
+
+            if (server.MaxConcurrentConnections > 0 &&
                 Interlocked.Increment(ref server._activeConnections) > server.MaxConcurrentConnections)
             {
                 Interlocked.Decrement(ref server._activeConnections);
@@ -90,7 +119,6 @@ public sealed class RangeTestServer : IAsyncDisposable
 
             try
             {
-                server.RequestCount++;
                 server.LastUserAgent = context.Request.Headers.UserAgent.ToString();
                 server.LastReferer = context.Request.Headers.Referer.ToString();
                 server.LastCookie = context.Request.Headers.Cookie.ToString();
@@ -107,13 +135,22 @@ public sealed class RangeTestServer : IAsyncDisposable
                 {
                     var (start, end) = ParseRange(rangeHeader, body.Length);
                     var length = end - start + 1;
+                    var isProbe = start == 0 && end == 0;
+                    var instanceLength = isProbe
+                        ? server.ProbeInstanceLength ?? body.Length
+                        : server.GetInstanceLength ?? body.Length;
+                    var bodyBytes = length;
+                    if (!isProbe && server.TruncateRangeBodyBytes is { } truncated)
+                    {
+                        bodyBytes = Math.Min(length, truncated);
+                    }
 
                     context.Response.StatusCode = StatusCodes.Status206PartialContent;
-                    context.Response.Headers.ContentRange = $"bytes {start}-{end}/{body.Length}";
+                    context.Response.Headers.ContentRange = $"bytes {start}-{end}/{instanceLength}";
                     context.Response.ContentType = "application/octet-stream";
-                    context.Response.ContentLength = length;
+                    context.Response.ContentLength = bodyBytes;
 
-                    await WriteBodyAsync(context, server, body, start, end, length, server.FailAfterBytes);
+                    await WriteBodyAsync(context, server, body, start, end, bodyBytes, server.FailAfterBytes);
                     return;
                 }
 

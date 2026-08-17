@@ -7,6 +7,12 @@ logger.Log("LocalDownloader.Host starting.");
 var input = Console.OpenStandardInput();
 var output = Console.OpenStandardOutput();
 
+// Connect (and launch the App if needed) BEFORE reading the first native-messaging frame so
+// the Host's 5s App-launch window runs while the extension is still waiting, rather than
+// after the first frame has already started the extension's response timer.
+var connector = new AppPipeConnector(logger);
+var appPipe = await connector.ConnectAsync(CancellationToken.None);
+
 // The Host is a thin proxy: it never parses download.create business fields. Its only job is
 // to get bytes from the browser's stdio Native Messaging channel to the App's named pipe (and
 // back), starting the App if the pipe is not already listening.
@@ -18,17 +24,16 @@ try
 catch (Exception ex) when (ex is IOException or InvalidDataException)
 {
     logger.Log($"Native messaging read error before first message: {ex.Message}");
+    appPipe?.Dispose();
     return;
 }
 
 if (firstMessage is null)
 {
     logger.Log("Browser closed the connection before sending any message.");
+    appPipe?.Dispose();
     return;
 }
-
-var connector = new AppPipeConnector(logger);
-var appPipe = await connector.ConnectAsync(CancellationToken.None);
 
 if (appPipe is null)
 {
