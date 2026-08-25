@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Test solution
+        run: dotnet test NativeDownloadManager.sln -c Release --nologo
+
+  # Optional: Core/Host tests are net10.0 (not WPF). WPF App tests stay on windows-latest.
+  test-core-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Test Core/Host
+        run: dotnet test apps/host/LocalDownloader.Tests/LocalDownloader.Tests.csproj -c Release --nologo
